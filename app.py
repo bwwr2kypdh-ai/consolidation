@@ -274,18 +274,20 @@ if st.session_state['project_data']:
     d = st.session_state['project_data']
     tabs = st.tabs(["🗺️ Topo & Contours", "⚠️ Tassements & Risques", "📍 Implantation PVD", "📉 Suivi & Coupes"])
 
-    # --- TAB 1: TOPO ---
-
+   # --- TAB 1: TOPO & CONTOURS ---
     with tabs[0]:
-        # --- SÉCURITÉ JSON LÉGACY : Calcule la moyenne uniquement si Z_nat existe ---
+        # Sécurité JSON Légacy
         z_mean = d['results']['Z_nat'].mean() if 'Z_nat' in d['results'].columns else 0.0
         st.write(f"Altitude Moyenne du terrain naturel : **{z_mean:.2f} m**")
+        st.download_button("Export MNT CSV", d['mnt'].to_csv(index=False).encode('utf-8'), "site_topo.csv")
         
         c1, c2 = st.columns(2)
-        # ... (la suite du code avec z_std = d['mnt']['Z'].std() etc. reste identique)
+        with c1:
+            st.write("**Contours Topographiques (Matplotlib)**")
             z_std = d['mnt']['Z'].std()
-            if z_std < 0.1: # Sécurité : Si écart < 10cm, terrain plat
-                st.info("Terrain plat. Pas de variations suffisantes pour générer des courbes de niveau.")
+            
+            if z_std < 0.05:
+                st.info("Le terrain scanné est parfaitement plat (Variation < 5 cm). Contours non affichés.")
             else:
                 try:
                     triang = tri.Triangulation(d['mnt']['Lon'], d['mnt']['Lat'])
@@ -295,15 +297,23 @@ if st.session_state['project_data']:
                     plt.colorbar(contour, ax=ax, label="Élévation (m)"); ax.set_xticks([]); ax.set_yticks([])
                     for spine in ax.spines.values(): spine.set_visible(False)
                     st.pyplot(fig); plt.close()
-                except: st.warning("Graphique indisponible.")
+                except Exception as e: 
+                    st.warning(f"Contours indisponibles : {e}")
 
         with c2:
+            st.write("**Grille de Précision (Maillage API)**")
             m_mnt = folium.Map(location=[d['mnt']['Lat'].mean(), d['mnt']['Lon'].mean()], zoom_start=16, tiles='CartoDB Positron')
             for z in d['zones']: folium.Polygon(locations=[(p[1], p[0]) for p in z['coords']], color='orange', weight=2, fill=False).add_to(m_mnt)
-            lats_g = sorted(d['mnt']['Lat'].unique())[::4]; lons_g = sorted(d['mnt']['Lon'].unique())[::4]
+            
+            lats_g = sorted(d['mnt']['Lat'].unique())[::4]
+            lons_g = sorted(d['mnt']['Lon'].unique())[::4]
             df_txt = d['mnt'][d['mnt']['Lat'].isin(lats_g) & d['mnt']['Lon'].isin(lons_g)]
+            
             for _, r in df_txt.iterrows():
-                folium.Marker([r['Lat'], r['Lon']], icon=folium.DivIcon(html=f'<div style="font-size:11px; color:darkred; font-weight:bold; transform:translate(-50%,-50%); text-shadow:1px 1px white,-1px -1px white;">{r["Z"]:.1f}</div>')).add_to(m_mnt)
+                folium.Marker(
+                    [r['Lat'], r['Lon']], 
+                    icon=folium.DivIcon(html=f'<div style="font-size:10px; color:darkred; font-weight:bold; transform:translate(-50%,-50%); text-shadow:1px 1px white,-1px -1px white;">{r["Z"]:.1f}</div>')
+                ).add_to(m_mnt)
             st_folium(m_mnt, width=600, height=400, key="mnt_inspect")
 
     # --- TAB 2: TASSEMENTS ---
