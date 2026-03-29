@@ -362,21 +362,38 @@ if st.session_state['project_data']:
         fig_p.update_layout(mapbox_style="carto-positron", mapbox_center={"lat": d['mnt']['Lat'].mean(), "lon": d['mnt']['Lon'].mean()}, mapbox_zoom=15, height=500)
         st.plotly_chart(fig_p, use_container_width=True)
 
+    # --- TAB 4: MONITORING & CROSS SECTIONS ---
     with tabs[3]:
-        z_sel = st.selectbox("Zone", [f"Zone {z['id']}" for z in d['zones']])
+        z_sel = st.selectbox("Sélection Zone", [f"Zone {z['id']}" for z in d['zones']])
         idx = int(z_sel.split(" ")[1]) - 1
         z_inf, r_inf = d['zones'][idx], d['results'].iloc[idx]
+        
+        # --- SÉCURITÉ ANTI-PLANTAGE POUR LES ANCIENS FICHIERS JSON ---
+        h_fill_val = r_inf.get('H_fill', r_inf.get('Fill_H', 0.0))
+        s_max_val = r_inf.get('S_max', 0.0)
+        
         c_m1, c_m2 = st.columns([1, 2])
         with c_m1:
-            st.write("**Coupe**")
+            st.write("**Coupe Stratigraphique**")
             f_cp = go.Figure()
             f_cp.add_trace(go.Scatter(x=[0,100,100,0], y=[0,0,-z_inf['H'],-z_inf['H']], fill='toself', name='Argile', fillcolor='brown'))
-            f_cp.add_trace(go.Scatter(x=[10,90,80,20], y=[0,0,r_inf['H_fill'],r_inf['H_fill']], fill='toself', name='Remblai', fillcolor='orange'))
-            f_cp.update_layout(height=250); st.plotly_chart(f_cp, use_container_width=True)
+            f_cp.add_trace(go.Scatter(x=[10,90,80,20], y=[0,0,h_fill_val,h_fill_val], fill='toself', name='Remblai', fillcolor='orange'))
+            f_cp.update_layout(height=250, margin=dict(t=20, b=20)); st.plotly_chart(f_cp, use_container_width=True)
+            
             df_mon = st.data_editor(pd.DataFrame({'Jour': [0, 30, 60, 90], 'Tassement_m': [0.0, 0.2, 0.45, 0.6]}), num_rows="dynamic")
+        
         with c_m2:
+            st.write("**Monitoring : Design vs Terrain**")
             days = np.linspace(0, 180 * 1.5, 100)
-            S_th = [hansbo_consolidation(z_inf['ch'], z_inf['spacing'], t) * r_inf['S_max'] for t in days]
-            f_s = go.Figure(); f_s.add_trace(go.Scatter(x=days, y=S_th, name='Design', line=dict(dash='dash', color='blue')))
-            f_s.add_trace(go.Scatter(x=df_mon['Jour'], y=df_mon['Tassement_m'], name='Terrain', mode='markers+lines', marker=dict(color='red')))
-            st.plotly_chart(f_s, use_container_width=True)
+            S_th = [hansbo_consolidation(z_inf['ch'], z_inf['spacing'], t) * s_max_val for t in days]
+            f_suivi = go.Figure()
+            f_suivi.add_trace(go.Scatter(x=days, y=S_th, name='Théorique', line=dict(dash='dash', color='blue')))
+            f_suivi.add_trace(go.Scatter(x=df_mon['Jour'], y=df_mon['Tassement_m'], name='Terrain', mode='markers+lines', marker=dict(color='red', size=10)))
+            
+            if len(df_mon) >= 3:
+                s_ult, _, _, _, _ = calculate_asaoka(df_mon['Jour'].values, df_mon['Tassement_m'].values, 15)
+                if s_ult:
+                    f_suivi.add_hline(y=s_ult, line_color="orange", annotation_text=f"Asaoka ({s_ult:.2f}m)")
+                    if s_ult > s_max_val * 1.15: st.error("🚨 DÉVIATION : Asaoka dépasse le design.")
+            f_suivi.add_hline(y=s_max_val, line_color="blue", annotation_text=f"S_ult Théorique ({s_max_val:.2f}m)")
+            f_suivi.update_layout(height=450); st.plotly_chart(f_suivi, use_container_width=True)
