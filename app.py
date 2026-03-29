@@ -7,6 +7,7 @@ import numpy as np
 from shapely.geometry import Polygon
 import math
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ==========================================
 # 1. PAGE CONFIGURATION & CSS
@@ -25,26 +26,30 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. AUTHENTICATION
+# 2. AUTHENTICATION (CALLBACK PATTERN)
 # ==========================================
-if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
-if not st.session_state["authenticated"]:
-    st.title("🔒 Accès Sécurisé - Simulateur Portuaire")
-    with st.form("login_form"):
-        if st.form_submit_button("Se connecter") and st.text_input("Code d'accès :", type="password") in st.secrets.get("passwords", {"default": "admin"}).values():
+def check_password():
+    def password_entered():
+        if st.session_state["pwd_input"].strip().lower() == "admin":
             st.session_state["authenticated"] = True
-            st.rerun() 
-        else: st.info("Entrez le mot de passe (par défaut: admin)")
-    st.stop()
+            del st.session_state["pwd_input"] 
+        else:
+            st.session_state["authenticated"] = False
 
-if st.sidebar.button("Se déconnecter 🚪"): st.session_state["authenticated"] = False; st.rerun()
+    if not st.session_state.get("authenticated", False):
+        st.title("🔒 Accès Sécurisé - Simulateur Portuaire")
+        st.text_input("Code d'accès (tapez 'admin' et Entrée) :", type="password", on_change=password_entered, key="pwd_input")
+        if "authenticated" in st.session_state and not st.session_state["authenticated"]:
+            st.error("Mot de passe incorrect. Veuillez réessayer.")
+        st.stop()
 
-# --- MEMOIRE DE SESSION --- 
-if 'map_center' not in st.session_state: st.session_state['map_center'] = [43.2965, 5.3698] 
-if 'project_data' not in st.session_state: st.session_state['project_data'] = None
+check_password()
+if st.sidebar.button("Se déconnecter 🚪"):
+    st.session_state["authenticated"] = False
+    st.rerun()
 
 # ==========================================
-# 3. CORE ENGINEERING MATH (UPGRADED FOR LAYERS)
+# 3. CORE ENGINEERING MATH
 # ==========================================
 def calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill):
     final_load = dead_load + live_load
@@ -53,14 +58,10 @@ def calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill):
     return final_load, target_load, base_fill_height
 
 def calc_settlement_oedometer_layered(layers, delta_sigma):
-    """Calculates S_ult by summing the discrete settlement of multiple strata."""
     total_S = 0.0
     for L in layers:
         H, e0, Cc, Cr, sig_0, sig_c = L['H'], L['e0'], L['Cc'], L['Cr'], L['sig_0'], L['sig_c']
-        # Simplified Boussinesq: Assuming 1D wide-fill, delta_sigma is relatively constant.
-        # For deep layers or small fills, an attenuation factor (I_z) should be applied here.
         final_stress = sig_0 + delta_sigma
-        
         if final_stress <= sig_c:
             total_S += H * (Cr / (1 + e0)) * math.log10(final_stress / sig_0)
         else:
@@ -74,7 +75,7 @@ def calc_settlement_cptu_layered(layers, delta_sigma):
     for L in layers:
         H, qt, sig_v0, alpha = L['H'], L['qt'], L['sig_v0'], L['alpha']
         M_kPa = alpha * ((qt * 1000) - sig_v0)
-        if M_kPa <= 0: M_kPa = 1000 # Failsafe for mud
+        if M_kPa <= 0: M_kPa = 1000 
         total_S += (delta_sigma / M_kPa) * H
     return total_S
 
@@ -101,8 +102,36 @@ def hansbo_consolidation(ch_m2_yr, spacing, t_days, apply_smear=False, kh_ks=3.0
     except OverflowError: Ur = 1.0
     return max(0.0, min(Ur, 1.0))
 
+# --- NEW: ASAOKA METHOD CALCULATION ---
+def calculate_asaoka(times, settlements, delta_t=10):
+    if len(times) < 3:
+        return None, None, None, None, None
+    
+    # Interpolate to strictly constant time intervals (delta_t)
+    t_interp = np.arange(min(times), max(times) + delta_t, delta_t)
+    s_interp = np.interp(t_interp, times, settlements)
+    
+    s_n_minus_1 = s_interp[:-1]
+    s_n = s_interp[1:]
+    
+    # Linear Regression: S_n = beta_0 + beta_1 * S_{n-1}
+    coef = np.polyfit(s_n_minus_1, s_n, 1)
+    beta_1, beta_0 = coef[0], coef[1]
+    
+    if beta_1 >= 1.0 or beta_1 <= 0:
+        return None, None, None, None, None # Invalid consolidation curve
+        
+    s_ult = beta_0 / (1 - beta_1)
+    return s_ult, beta_0, beta_1, s_n_minus_1, s_n
+
 # ==========================================
-# 4. SIDEBAR PARAMETERS (DYNAMIC ZONING)
+# 4. SESSION STATE MEMORY
+# ==========================================
+if 'map_center' not in st.session_state: st.session_state['map_center'] = [43.2965, 5.3698]
+if 'project_data' not in st.session_state: st.session_state['project_data'] = None
+
+# ==========================================
+# 5. SIDEBAR PARAMETERS
 # ==========================================
 st.sidebar.header("📍 Localisation")
 search_query = st.sidebar.text_input("Recherche GPS (Lat, Lon)")
@@ -123,22 +152,19 @@ gamma_fill = st.sidebar.number_input("Poids Volumique Remblai (γ) [kN/m³]", va
 
 st.sidebar.markdown("---")
 st.sidebar.header("🗜️ Stratigraphie (Zoning)")
-num_layers = st.sidebar.number_input("Nombre de couches compressibles", min_value=1, max_value=5, value=2)
+num_layers = st.sidebar.number_input("Nombre de couches compressibles", min_value=1, max_value=5, value=1)
 
 soil_layers = []
 for i in range(int(num_layers)):
     with st.sidebar.expander(f"Couche {i+1} Parameters", expanded=(i==0)):
-        st.caption("Dimensions & Oedometer")
-        H = st.number_input(f"Épaisseur (m)", value=5.0, key=f"H_{i}")
+        H = st.number_input(f"Épaisseur (m)", value=8.0, key=f"H_{i}")
         e0 = st.number_input("e0", value=1.20, key=f"e0_{i}")
         Cc = st.number_input("Cc", value=0.45, key=f"Cc_{i}")
         Cr = st.number_input("Cr", value=0.05, key=f"Cr_{i}")
-        sig_0 = st.number_input("σ'0 [kPa]", value=40.0+(i*20), key=f"s0_{i}")
-        sig_c = st.number_input("σ'c [kPa]", value=45.0+(i*20), key=f"sc_{i}")
-        
-        st.caption("CPTu & SPT")
+        sig_0 = st.number_input("σ'0 [kPa]", value=40.0, key=f"s0_{i}")
+        sig_c = st.number_input("σ'c [kPa]", value=45.0, key=f"sc_{i}")
         qt = st.number_input("qt [MPa]", value=0.60, key=f"qt_{i}")
-        sig_v0 = st.number_input("σv0 (Totale) [kPa]", value=50.0+(i*20), key=f"sv0_{i}")
+        sig_v0 = st.number_input("σv0 (Totale) [kPa]", value=50.0, key=f"sv0_{i}")
         alpha = st.number_input("α_M Factor", value=4.0, key=f"a_{i}")
         N60 = st.number_input("N60 Blows", value=3.0, key=f"n60_{i}")
         f2 = st.number_input("f2 Factor [kPa]", value=500.0, key=f"f2_{i}")
@@ -147,7 +173,6 @@ for i in range(int(num_layers)):
             'H': H, 'e0': e0, 'Cc': Cc, 'Cr': Cr, 'sig_0': sig_0, 'sig_c': sig_c,
             'qt': qt, 'sig_v0': sig_v0, 'alpha': alpha, 'N60': N60, 'f2': f2
         })
-
 total_H = sum(layer['H'] for layer in soil_layers)
 
 st.sidebar.markdown("---")
@@ -158,17 +183,9 @@ target_time = st.sidebar.number_input("Temps Cible (Jours)", value=180, step=10)
 apply_smear = st.sidebar.toggle("Inclure Effet 'Smear'", value=True)
 
 # ==========================================
-# 5. MAIN UI & CALCULATIONS
+# 6. MAIN UI & CALCULATIONS
 # ==========================================
 st.title("⚓ Port Terminal Surcharge Optimizer PRO")
-
-with st.expander("⚠️ Notes Techniques & Limites du Modèle (Geotechnical Disclaimers)"):
-    st.warning("""
-    * **Diffusion des Contraintes (Boussinesq) :** Le modèle suppose une charge $\Delta\sigma$ constante sur toute la profondeur. Cela est valide pour le centre d'une très large zone de remblai, mais surestime le tassement sur les bords.
-    * **Fluage (Secondary Compression) :** Le fluage à long terme ($C_\\alpha$) n'est pas modélisé. Le ratio de surcharge doit être calculé par l'ingénieur pour anticiper et annuler cette phase.
-    * **Nappes Phréatiques :** Les contraintes effectives ($\sigma'_0$) saisies supposent un niveau d'eau statique. Un rabattement de nappe augmentera instantanément le tassement.
-    * **Risque de Rupture (Mudwave) :** L'application de la hauteur totale de remblai requise doit se faire par levées progressives pour éviter une rupture au cisaillement non drainé ($S_u$).
-    """)
 
 m = folium.Map(location=st.session_state['map_center'], zoom_start=15, 
                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri')
@@ -191,118 +208,148 @@ with col2:
         if not poly_coords:
             st.error("🛑 Veuillez dessiner un polygone sur la carte.")
         else:
-            with st.spinner("Analyse Stratigraphique en cours..."):
-                poly = Polygon(poly_coords)
-                c_lat = (poly.bounds[1] + poly.bounds[3]) / 2
-                area_m2 = poly.area * (111000**2) * math.cos(math.radians(c_lat))
-                
-                # Loads
-                final_load, target_load, base_fill_height = calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill)
-                
-                # Multi-Layer Settlement
-                S_lab = calc_settlement_oedometer_layered(soil_layers, target_load)
-                S_cpt = calc_settlement_cptu_layered(soil_layers, target_load)
-                S_spt = calc_settlement_spt_layered(soil_layers, target_load)
-                
-                # Always design for the worst-case envelope
-                design_settlement = max(S_lab, S_cpt, S_spt)
-                
-                # Compensated Logistics
-                actual_fill_height = base_fill_height + design_settlement
-                total_fill_volume = area_m2 * actual_fill_height
-                total_fill_tonnage = (total_fill_volume * gamma_fill) / 9.81
-                
-                area_per_pvd = 0.866 * (pvd_spacing**2)
-                total_pvds_required = math.ceil(area_m2 / area_per_pvd)
-                total_pvd_linear_meters = total_pvds_required * total_H
-
-                st.session_state['project_data'] = {
-                    'area_m2': area_m2, 'target_load': target_load, 'base_height': base_fill_height,
-                    'S_lab': S_lab, 'S_cpt': S_cpt, 'S_spt': S_spt, 'S_design': design_settlement,
-                    'actual_height': actual_fill_height, 'volume_m3': total_fill_volume, 
-                    'tonnage_t': total_fill_tonnage, 'pvd_count': total_pvds_required, 
-                    'pvd_length_m': total_pvd_linear_meters, 'polygon': poly_coords, 'total_H': total_H
-                }
-                st.success("✅ Modélisation terminée.")
+            poly = Polygon(poly_coords)
+            c_lat = (poly.bounds[1] + poly.bounds[3]) / 2
+            area_m2 = poly.area * (111000**2) * math.cos(math.radians(c_lat))
+            
+            final_load, target_load, base_fill_height = calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill)
+            S_lab = calc_settlement_oedometer_layered(soil_layers, target_load)
+            S_cpt = calc_settlement_cptu_layered(soil_layers, target_load)
+            S_spt = calc_settlement_spt_layered(soil_layers, target_load)
+            
+            design_settlement = max(S_lab, S_cpt, S_spt)
+            actual_fill_height = base_fill_height + design_settlement
+            total_fill_volume = area_m2 * actual_fill_height
+            
+            st.session_state['project_data'] = {
+                'area_m2': area_m2, 'target_load': target_load, 'base_height': base_fill_height,
+                'S_lab': S_lab, 'S_cpt': S_cpt, 'S_spt': S_spt, 'S_design': design_settlement,
+                'actual_height': actual_fill_height, 'volume_m3': total_fill_volume, 
+                'total_H': total_H, 'polygon': poly_coords
+            }
+            st.success("✅ Modélisation terminée.")
 
 # ==========================================
-# 6. RESULTS DASHBOARD
+# 7. RESULTS DASHBOARD (WITH PHASES 3, 4, 5)
 # ==========================================
 if st.session_state['project_data'] is not None:
     pd_data = st.session_state['project_data']
     
     st.markdown("---")
-    tab_set, tab_geo, tab_log, tab_map = st.tabs([
-        "🗜️ Tassements (Tri-Méthode)", 
-        "📊 Cinématique de Consolidation", 
-        "🚜 Logistique & Terrassement", 
-        "🗺️ Plan d'Exécution"
+    tab_set, tab_exec, tab_asaoka = st.tabs([
+        "🗜️ Tassements & Volume (Phases 1-2)", 
+        "📅 Phasage & Exécution (Phases 3-4)", 
+        "📉 Suivi Asaoka (Phase 5)"
     ])
     
+    # --- TAB 1: EXISTING RESULTS ---
     with tab_set:
-        st.subheader("Prédictions de Tassement Cumulé (Modèle Multicouche)")
-        st.caption(f"Intégration sur {num_layers} couches (Profondeur totale: {pd_data['total_H']}m) sous charge cible de {pd_data['target_load']:.0f} kPa.")
-        
+        st.subheader("Prédictions Théoriques & Logistique")
         c1, c2, c3 = st.columns(3)
-        c1.metric("1. Oedomètre (Labo)", f"{pd_data['S_lab']:.3f} m")
-        c2.metric("2. CPTu (Modèle In-Situ)", f"{pd_data['S_cpt']:.3f} m")
-        c3.metric("3. SPT (Approximation)", f"{pd_data['S_spt']:.3f} m")
-        
-        st.info(f"💡 **Verdict Géotechnique :** L'enveloppe de sécurité maximale retenue pour le volume de remblai est de **{pd_data['S_design']:.3f} m**.")
+        c1.metric("1. Oedomètre", f"{pd_data['S_lab']:.3f} m")
+        c2.metric("2. CPTu", f"{pd_data['S_cpt']:.3f} m")
+        c3.metric("Hauteur Remblai Requise", f"{pd_data['actual_height']:.2f} m", f"Inclus {pd_data['S_design']:.2f}m de tassement")
+        st.info(f"Volume total compensé à importer : **{pd_data['volume_m3']:,.0f} m³**")
 
-    with tab_geo:
-        st.subheader("Courbe de Consolidation Radiale (Théorie de Hansbo)")
-        target_U = hansbo_consolidation(ch_val, pvd_spacing, target_time, apply_smear) * 100
+    # --- TAB 2: EXECUTION TRACKING (Phases 3 & 4) ---
+    with tab_exec:
+        st.subheader("Chronogramme de Mise en Œuvre (Lifts)")
+        st.caption("Modifiez le tableau ci-dessous pour planifier ou enregistrer les dates de pose des PVD et des levées de terre.")
         
-        days_array = np.linspace(0, max(365, int(target_time * 1.5)), 150)
-        U_array = [hansbo_consolidation(ch_val, pvd_spacing, t, apply_smear) * 100 for t in days_array]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=days_array, y=U_array, mode='lines', name=f'Espacement {pvd_spacing}m', line=dict(color='royalblue', width=3)))
-        fig.add_hline(y=90, line_dash="dash", line_color="red", annotation_text="Objectif 90%")
-        fig.add_vline(x=target_time, line_dash="dot", line_color="green", annotation_text=f"Délai ({target_U:.1f}%)")
-        
-        fig.update_layout(xaxis_title="Temps (Jours)", yaxis_title="Degré de Consolidation U (%)", yaxis_range=[0, 105], height=400, margin=dict(l=20, r=20, t=40, b=20))
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tab_log:
-        st.subheader("Quantitatifs Corrigés (Bilan Matière)")
-        st.caption("Le volume compense automatiquement la fraction de remblai qui s'enfoncera sous la surface finale (Compensation de tassement).")
-        
-        df_logistics = pd.DataFrame({
-            "Indicateur": [
-                "Emprise au sol (Surface)", 
-                "Hauteur de remblai stricte (Théorie)",
-                "Majoration pour tassement (Compensation)",
-                "Hauteur réelle d'exécution (Levées totales)",
-                "Volume total de terre à importer", 
-                "Tonnage approximatif (Logistique camions)",
-                "Nombre d'unités PVD", 
-                "Métré linéaire total PVD (Achat)"
-            ],
-            "Valeur": [
-                f"{pd_data['area_m2']:,.0f} m²",
-                f"{pd_data['base_height']:.2f} m",
-                f"+ {pd_data['S_design']:.3f} m",
-                f"{pd_data['actual_height']:.2f} m",
-                f"{pd_data['volume_m3']:,.0f} m³",
-                f"{pd_data['tonnage_t']:,.0f} Tonnes",
-                f"{pd_data['pvd_count']:,.0f} drains",
-                f"{pd_data['pvd_length_m']:,.0f} ml"
-            ]
+        # Default Execution Data
+        default_lifts = pd.DataFrame({
+            'Jour': [0, 15, 45, 75],
+            'Hauteur_Ajoutee_m': [0.5, 1.5, 1.5, 1.0],
+            'Operation': ['Plateforme Sable & PVD', 'Levée 1', 'Levée 2', 'Levée 3 (Cible atteinte)']
         })
-        st.table(df_logistics)
+        
+        col_ed1, col_ed2 = st.columns([1, 2])
+        with col_ed1:
+            edited_lifts = st.data_editor(default_lifts, num_rows="dynamic", use_container_width=True)
+            
+        with col_ed2:
+            # Calculate cumulative height for step chart
+            edited_lifts = edited_lifts.sort_values(by='Jour')
+            edited_lifts['Hauteur_Cumulee_m'] = edited_lifts['Hauteur_Ajoutee_m'].cumsum()
+            
+            fig_exec = go.Figure()
+            # line_shape='hv' creates the horizontal-vertical step chart typical of fill placement
+            fig_exec.add_trace(go.Scatter(x=edited_lifts['Jour'], y=edited_lifts['Hauteur_Cumulee_m'], 
+                                          mode='lines+markers', line_shape='hv', name='Hauteur de Remblai',
+                                          line=dict(color='orange', width=4), marker=dict(size=10, color='black')))
+            
+            # Add target line
+            fig_exec.add_hline(y=pd_data['actual_height'], line_dash="dash", line_color="red", 
+                               annotation_text=f"Objectif Final ({pd_data['actual_height']:.2f} m)")
+            
+            fig_exec.update_layout(title="Progression du Chargement (Surcharge Lifts)", xaxis_title="Temps (Jours)", 
+                                   yaxis_title="Épaisseur du Remblai (m)", height=400)
+            st.plotly_chart(fig_exec, use_container_width=True)
 
-    with tab_map:
-        st.subheader("Emprise du Traitement de Sol")
-        c_lat_res = sum([p[1] for p in pd_data['polygon']]) / len(pd_data['polygon'])
-        c_lon_res = sum([p[0] for p in pd_data['polygon']]) / len(pd_data['polygon'])
+    # --- TAB 3: ASAOKA OBSERVATIONAL METHOD (Phase 5) ---
+    with tab_asaoka:
+        st.subheader("Méthode Observationnelle d'Asaoka")
+        st.caption("Saisissez les relevés des plaques de tassement sur le terrain. L'IA corrigera les intervalles et projettera le tassement ultime réel.")
         
-        m_res = folium.Map(location=[c_lat_res, c_lon_res], zoom_start=16, tiles='CartoDB Positron')
-        folium.Polygon(
-            locations=[(p[1], p[0]) for p in pd_data['polygon']], 
-            color='orange', weight=3, fill=True, fill_opacity=0.4,
-            tooltip=f"Volume à purger/remblayer : {pd_data['volume_m3']:,.0f} m³"
-        ).add_to(m_res)
+        # Default Monitoring Data (Showing typical consolidation curve)
+        default_monitor = pd.DataFrame({
+            'Jour': [0, 15, 30, 45, 60, 75, 90, 105],
+            'Tassement_m': [0.0, 0.12, 0.22, 0.30, 0.36, 0.41, 0.45, 0.48]
+        })
         
-        st_folium(m_res, width=1200, height=500, key="result_map")
+        col_as1, col_as2 = st.columns([1, 2])
+        
+        with col_as1:
+            delta_t = st.number_input("Intervalle de temps (Δt) pour Asaoka [Jours]", value=15, step=5)
+            edited_monitor = st.data_editor(default_monitor, num_rows="dynamic", use_container_width=True)
+            edited_monitor = edited_monitor.sort_values(by='Jour')
+            
+            times = edited_monitor['Jour'].values
+            settlements = edited_monitor['Tassement_m'].values
+            
+            s_ult_asaoka, b0, b1, sn_minus_1, sn = calculate_asaoka(times, settlements, delta_t)
+            
+            if s_ult_asaoka:
+                st.success(f"**Tassement Ultime Projeté ($S_{{ult}}$) : {s_ult_asaoka:.3f} m**")
+                consolidation_pct = (settlements[-1] / s_ult_asaoka) * 100
+                st.info(f"Consolidation actuelle : **{consolidation_pct:.1f}%**")
+                if consolidation_pct >= 90.0:
+                    st.balloons()
+                    st.success("✅ **Objectif de 90% atteint ! Autorisation de déchargement.**")
+            else:
+                st.error("Données insuffisantes ou non-convergentes pour la méthode d'Asaoka.")
+
+        with col_as2:
+            if s_ult_asaoka:
+                fig_asaoka = make_subplots(rows=1, cols=2, subplot_titles=("Données de Terrain vs Projection", "Graphe d'Asaoka ($S_n$ vs $S_{n-1}$)"))
+                
+                # Plot 1: Standard Time-Settlement Curve
+                fig_asaoka.add_trace(go.Scatter(x=times, y=settlements, mode='markers+lines', name='Relevés Terrain', 
+                                                line=dict(color='blue', width=2), marker=dict(size=8)), row=1, col=1)
+                fig_asaoka.add_hline(y=s_ult_asaoka, line_dash="dash", line_color="red", 
+                                     annotation_text=f"Asaoka S_ult ({s_ult_asaoka:.2f}m)", row=1, col=1)
+                
+                # Plot 2: Asaoka Plot
+                fig_asaoka.add_trace(go.Scatter(x=sn_minus_1, y=sn, mode='markers', name='Points Asaoka', marker=dict(color='black', size=8)), row=1, col=2)
+                
+                # Trendline
+                x_trend = np.array([0, s_ult_asaoka * 1.1])
+                y_trend = b0 + b1 * x_trend
+                fig_asaoka.add_trace(go.Scatter(x=x_trend, y=y_trend, mode='lines', name='Tendance Linéaire (Ajustement)', 
+                                                line=dict(color='orange', width=2, dash='dash')), row=1, col=2)
+                
+                # 45-degree line (y = x)
+                fig_asaoka.add_trace(go.Scatter(x=x_trend, y=x_trend, mode='lines', name='Ligne 45° ($S_n = S_{n-1}$)', 
+                                                line=dict(color='green', width=1)), row=1, col=2)
+                
+                fig_asaoka.update_layout(height=450, showlegend=False)
+                fig_asaoka.update_xaxes(title_text="Temps (Jours)", row=1, col=1)
+                fig_asaoka.update_yaxes(title_text="Tassement (m)", row=1, col=1)
+                fig_asaoka.update_xaxes(title_text="Tassement S_{n-1} (m)", row=1, col=2)
+                fig_asaoka.update_yaxes(title_text="Tassement S_n (m)", row=1, col=2)
+                
+                st.plotly_chart(fig_asaoka, use_container_width=True)
+
+# ==========================================
+# END OF SCRIPT
+# ==========================================
