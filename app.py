@@ -8,9 +8,10 @@ import numpy as np
 from shapely.geometry import Polygon
 import math
 import plotly.graph_objects as go
-import time
 
-# --- 1. PAGE CONFIGURATION & CSS ---
+# ==========================================
+# 1. PAGE CONFIGURATION & CSS
+# ==========================================
 st.set_page_config(layout="wide", page_title="Port Surcharge Optimizer")
 
 st.markdown("""
@@ -24,54 +25,83 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. AUTHENTICATION (SECURITY) ---
+# ==========================================
+# 2. AUTHENTICATION (BUG FIXED)
+# ==========================================
 if "authenticated" not in st.session_state: 
     st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
     st.title("🔒 Secure Access - Geotechnical Portal")
     with st.form("login_form"):
-        # Uses st.secrets if deployed, otherwise fallbacks to hardcoded 'admin'
-        passcode = st.text_input("Access Code:", type="password")
-        if st.form_submit_button("Login") and passcode == "admin":
-            st.session_state["authenticated"] = True
-            st.rerun()
-        elif passcode:
-            st.error("Incorrect Password.")
+        passcode = st.text_input("Access Code (Hint: admin):", type="password")
+        submitted = st.form_submit_button("Login")
+        
+        # FIX: Only check credentials IF the button was actually clicked
+        if submitted:
+            if passcode == "admin":
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect Password. Please try again.")
     st.stop()
 
 if st.sidebar.button("Logout 🚪"): 
     st.session_state["authenticated"] = False
     st.rerun()
 
-# --- 3. SESSION STATE MEMORY ---
-if 'map_center' not in st.session_state: st.session_state['map_center'] = [43.2965, 5.3698] # Default Marseille Port
-if 'project_data' not in st.session_state: st.session_state['project_data'] = None
-
-# --- 4. CORE ENGINEERING MATH ---
+# ==========================================
+# 3. CORE ENGINEERING MATH
+# ==========================================
 def calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill):
     final_load = dead_load + live_load
     target_load = final_load * surcharge_ratio
-    req_fill_height = target_load / gamma_fill
-    return final_load, target_load, req_fill_height
+    base_fill_height = target_load / gamma_fill
+    return final_load, target_load, base_fill_height
+
+def calc_settlement_oedometer(H, e0, Cc, Cr, sigma_0_prime, sigma_c_prime, delta_sigma):
+    final_stress = sigma_0_prime + delta_sigma
+    if final_stress <= sigma_c_prime:
+        return H * (Cr / (1 + e0)) * math.log10(final_stress / sigma_0_prime)
+    else:
+        S_recomp = H * (Cr / (1 + e0)) * math.log10(sigma_c_prime / sigma_0_prime)
+        S_virgin = H * (Cc / (1 + e0)) * math.log10(final_stress / sigma_c_prime)
+        return S_recomp + S_virgin
+
+def calc_settlement_cptu(H, qt_MPa, sigma_v0_kPa, alpha_M, delta_sigma_kPa):
+    qt_kPa = qt_MPa * 1000 
+    M_kPa = alpha_M * (qt_kPa - sigma_v0_kPa)
+    if M_kPa <= 0: M_kPa = 1000
+    return (delta_sigma_kPa / M_kPa) * H
+
+def calc_settlement_spt(H, N60, f2_factor_kPa, delta_sigma_kPa):
+    M_kPa = f2_factor_kPa * N60
+    if M_kPa <= 0: M_kPa = 1000
+    return (delta_sigma_kPa / M_kPa) * H
 
 def hansbo_consolidation(ch_m2_yr, spacing, t_days, apply_smear=False, kh_ks=3.0, ds=0.2):
     if t_days <= 0: return 0.0
     ch_day = ch_m2_yr / 365.25
-    D = 1.05 * spacing # Triangular grid influence
-    dw = 0.052 # Equivalent diameter of typical PVD
+    D = 1.05 * spacing 
+    dw = 0.052 
     n = D / dw
     Fn = math.log(n) - 0.75
     Fs = (kh_ks - 1.0) * math.log(ds / dw) if apply_smear else 0.0
     F = Fn + Fs
     Tr = (ch_day * t_days) / (D**2)
-    try:
-        Ur = 1.0 - math.exp((-8.0 * Tr) / F)
-    except OverflowError:
-        Ur = 1.0
+    try: Ur = 1.0 - math.exp((-8.0 * Tr) / F)
+    except OverflowError: Ur = 1.0
     return max(0.0, min(Ur, 1.0))
 
-# --- 5. SIDEBAR: LOCATION & APIs ---
+# ==========================================
+# 4. SESSION STATE MEMORY
+# ==========================================
+if 'map_center' not in st.session_state: st.session_state['map_center'] = [43.2965, 5.3698]
+if 'project_data' not in st.session_state: st.session_state['project_data'] = None
+
+# ==========================================
+# 5. SIDEBAR PARAMETERS
+# ==========================================
 st.sidebar.header("📍 Site Location")
 search_query = st.sidebar.text_input("Search Coordinates (Lat, Lon)")
 if st.sidebar.button("Go to Location"):
@@ -83,43 +113,43 @@ if st.sidebar.button("Go to Location"):
         except: pass
 
 st.sidebar.markdown("---")
-st.sidebar.header("🌐 Topography API")
-api_choice = st.sidebar.selectbox("Elevation Provider", ["Open-Meteo (Free)", "Google Maps API", "Manual Flat Elevation"])
-api_key = ""
-manual_elev = 0.0
-if "Google" in api_choice:
-    api_key = st.sidebar.text_input("Google API Key", type="password")
-elif "Manual" in api_choice:
-    manual_elev = st.sidebar.number_input("Average Elevation (m MSL)", value=2.0)
-
-# --- 6. SIDEBAR: GEOTECHNICAL PARAMS ---
-st.sidebar.markdown("---")
-st.sidebar.header("🏗️ Loading & Soil Profiles")
+st.sidebar.header("🏗️ Structural Loading")
 dead_load = st.sidebar.number_input("Dead Load (Pavement) [kPa]", value=20.0, step=5.0)
 live_load = st.sidebar.number_input("Live Load (Operations) [kPa]", value=80.0, step=5.0)
 surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 2.0, 1.2, step=0.05)
 gamma_fill = st.sidebar.number_input("Fill Unit Weight (γ) [kN/m³]", value=19.0, step=0.5)
 
-st.sidebar.subheader("Compressible Soil Zones")
-num_zones = st.sidebar.number_input("Number of Zones", min_value=1, max_value=3, value=1)
-zones = []
-for i in range(int(num_zones)):
-    with st.sidebar.expander(f"Zone {i+1} Parameters", expanded=(i==0)):
-        H = st.number_input(f"Thickness (m)", value=10.0, step=1.0, key=f"H_{i}")
-        ch = st.number_input(f"Radial Cons. (ch) [m²/yr]", value=2.0, step=0.5, key=f"ch_{i}")
-        zones.append({'Zone': f"Zone {i+1}", 'Thickness (m)': H, 'ch (m²/yr)': ch})
-df_zones = pd.DataFrame(zones)
-total_clay_depth = df_zones['Thickness (m)'].sum()
+st.sidebar.markdown("---")
+st.sidebar.header("🗜️ Soil Compressibility")
+H_layer = st.sidebar.number_input("Compressible Layer Thickness (m)", value=10.0, step=1.0)
 
-# --- 7. SIDEBAR: PVD DESIGN ---
+with st.sidebar.expander("1. Oedometer (Lab)", expanded=True):
+    e0 = st.number_input("e0", value=1.20)
+    Cc = st.number_input("Cc", value=0.45)
+    Cr = st.number_input("Cr", value=0.05)
+    sig_0 = st.number_input("σ'0 [kPa]", value=40.0)
+    sig_c = st.number_input("σ'c [kPa]", value=45.0)
+
+with st.sidebar.expander("2. CPTu (Field)"):
+    qt = st.number_input("qt [MPa]", value=0.60)
+    sig_v0 = st.number_input("σv0 [kPa]", value=50.0)
+    alpha_M = st.number_input("α_M Factor", value=4.0)
+
+with st.sidebar.expander("3. SPT (Field)"):
+    N60 = st.number_input("N60 Blows", value=3.0)
+    f2 = st.number_input("f2 Factor [kPa]", value=500.0)
+
 st.sidebar.markdown("---")
 st.sidebar.header("🚰 PVD Drain Design")
+ch_val = st.sidebar.number_input("Radial Cons. (ch) [m²/yr]", value=2.0, step=0.5)
 pvd_spacing = st.sidebar.slider("PVD Spacing (m)", 0.8, 3.0, 1.2, step=0.1)
 target_time = st.sidebar.number_input("Target Time (Days)", value=180, step=10)
 apply_smear = st.sidebar.toggle("Include Smear Effect", value=True)
 
-# --- 8. MAIN UI: MAP SELECTION ---
-st.title("⚓ Port Terminal Surcharge & Preloading")
+# ==========================================
+# 6. MAIN UI & MAP SELECTION
+# ==========================================
+st.title("⚓ Port Terminal Surcharge Optimizer")
 
 m = folium.Map(location=st.session_state['map_center'], zoom_start=15, 
                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -130,12 +160,11 @@ col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("1. Define Treatment Area")
-    st.caption("Draw a polygon around the port area requiring soil improvement.")
     output = st_folium(m, width=800, height=500, key="input_map")
 
 with col2:
     st.subheader("2. Execute Design")
-    if st.button("🚀 CALCULATE SURCHARGE & PVDs", use_container_width=True, type="primary"):
+    if st.button("🚀 CALCULATE SURCHARGE", use_container_width=True, type="primary"):
         poly_coords = None
         if output and output.get("all_drawings"):
             polys = [d for d in output["all_drawings"] if d.get("geometry", {}).get("type") == "Polygon"]
@@ -144,126 +173,126 @@ with col2:
         if not poly_coords:
             st.error("🛑 Please draw a polygon on the map first.")
         else:
-            with st.spinner("Processing Geotechnical Data..."):
+            with st.spinner("Processing Geotechnical Models..."):
                 poly = Polygon(poly_coords)
                 c_lat = (poly.bounds[1] + poly.bounds[3]) / 2
-                
-                # Calculate True Area in Square Meters based on Latitude
                 area_m2 = poly.area * (111000**2) * math.cos(math.radians(c_lat))
                 
-                # Fetch baseline elevation at centroid
-                c_lon = (poly.bounds[0] + poly.bounds[2]) / 2
-                baseline_elev = manual_elev
+                # 1. Base Loads
+                final_load, target_load, base_fill_height = calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill)
                 
-                if "Open-Meteo" in api_choice:
-                    try:
-                        r = requests.get(f"https://api.open-meteo.com/v1/elevation?latitude={c_lat}&longitude={c_lon}").json()
-                        baseline_elev = r.get('elevation', [manual_elev])[0]
-                    except: pass
-                elif "Google" in api_choice and api_key:
-                    try:
-                        r = requests.get(f"https://maps.googleapis.com/maps/api/elevation/json?locations={c_lat},{c_lon}&key={api_key}").json()
-                        baseline_elev = r['results'][0]['elevation'] if r['status'] == 'OK' else manual_elev
-                    except: pass
-
-                # Engineering Calculations
-                final_load, target_load, req_fill_height = calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill)
+                # 2. Settlement Calculations
+                S_lab = calc_settlement_oedometer(H_layer, e0, Cc, Cr, sig_0, sig_c, target_load)
+                S_cpt = calc_settlement_cptu(H_layer, qt, sig_v0, alpha_M, target_load)
+                S_spt = calc_settlement_spt(H_layer, N60, f2, target_load)
                 
-                # Logistics Calculations
-                total_fill_volume = area_m2 * req_fill_height
-                total_fill_weight = total_fill_volume * gamma_fill # in kN
-                total_fill_tonnage = total_fill_weight / 9.81 # in Metric Tons
+                design_settlement = max(S_lab, S_cpt, S_spt)
                 
-                # PVD Logistics (Triangular Grid Area = 0.866 * S^2)
+                # 3. Compensated Logistics
+                actual_fill_height = base_fill_height + design_settlement
+                total_fill_volume = area_m2 * actual_fill_height
+                total_fill_tonnage = (total_fill_volume * gamma_fill) / 9.81
+                
+                # 4. PVD Logistics
                 area_per_pvd = 0.866 * (pvd_spacing**2)
                 total_pvds_required = math.ceil(area_m2 / area_per_pvd)
-                total_pvd_linear_meters = total_pvds_required * total_clay_depth
+                total_pvd_linear_meters = total_pvds_required * H_layer
 
-                # Save to session state
+                # Save State
                 st.session_state['project_data'] = {
                     'area_m2': area_m2,
-                    'baseline_elev': baseline_elev,
-                    'req_fill_height': req_fill_height,
                     'target_load': target_load,
-                    'volume_m3': total_fill_volume,
-                    'tonnage_t': total_fill_tonnage,
-                    'pvd_count': total_pvds_required,
-                    'pvd_length_m': total_pvd_linear_meters,
+                    'base_height': base_fill_height,
+                    'S_lab': S_lab, 'S_cpt': S_cpt, 'S_spt': S_spt, 'S_design': design_settlement,
+                    'actual_height': actual_fill_height,
+                    'volume_m3': total_fill_volume, 'tonnage_t': total_fill_tonnage,
+                    'pvd_count': total_pvds_required, 'pvd_length_m': total_pvd_linear_meters,
                     'polygon': poly_coords
                 }
                 st.success("✅ Calculations Complete!")
 
-# --- 9. RESULTS DASHBOARD ---
+# ==========================================
+# 7. RESULTS DASHBOARD
+# ==========================================
 if st.session_state['project_data'] is not None:
     pd_data = st.session_state['project_data']
     
     st.markdown("---")
-    tab_geo, tab_log, tab_map = st.tabs(["📊 Consolidation Dynamics", "🚜 Earthworks & Logistics", "🗺️ Topography Map"])
+    tab_set, tab_geo, tab_log, tab_map = st.tabs([
+        "🗜️ Tri-Method Settlement", 
+        "📊 Consolidation Dynamics", 
+        "🚜 Earthworks Logistics", 
+        "🗺️ Topography Map"
+    ])
     
-    # TAB 1: GEOTECH & CONSOLIDATION GRAPH
-    with tab_geo:
-        st.subheader("Time-Consolidation Analysis")
-        critical_ch = df_zones['ch (m²/yr)'].min()
-        target_U = hansbo_consolidation(critical_ch, pvd_spacing, target_time, apply_smear) * 100
+    # TAB 1: SETTLEMENT
+    with tab_set:
+        st.subheader("Compressibility Predictions")
+        st.caption(f"Predicted settlement under the Target Surcharge Load of {pd_data['target_load']:.0f} kPa.")
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Required Fill Height", f"{pd_data['req_fill_height']:.2f} m", f"Load: {pd_data['target_load']:.0f} kPa")
-        c2.metric("Critical Consolidation (ch)", f"{critical_ch:.2f} m²/yr")
-        c3.metric(f"Consolidation @ {target_time} Days", f"{target_U:.1f} %", "Target Met" if target_U >= 90 else "Failed (<90%)", delta_color="normal" if target_U >= 90 else "inverse")
+        c1.metric("1. Oedometer (Lab)", f"{pd_data['S_lab']:.3f} m")
+        c2.metric("2. CPTu (Field)", f"{pd_data['S_cpt']:.3f} m")
+        c3.metric("3. SPT (Field)", f"{pd_data['S_spt']:.3f} m")
+        
+        st.info(f"💡 **Design Protocol:** The system has selected the maximum envelope of **{pd_data['S_design']:.3f} m** to safely calculate volumetric fill requirements.")
 
-        # Plotly Graph
-        max_days = max(365, int(target_time * 1.5))
-        days_array = np.linspace(0, max_days, 150)
-        U_array = [hansbo_consolidation(critical_ch, pvd_spacing, t, apply_smear) * 100 for t in days_array]
+    # TAB 2: CONSOLIDATION GRAPH
+    with tab_geo:
+        st.subheader("Time-Consolidation Analysis (Hansbo)")
+        target_U = hansbo_consolidation(ch_val, pvd_spacing, target_time, apply_smear) * 100
+        
+        days_array = np.linspace(0, max(365, int(target_time * 1.5)), 150)
+        U_array = [hansbo_consolidation(ch_val, pvd_spacing, t, apply_smear) * 100 for t in days_array]
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=days_array, y=U_array, mode='lines', name=f'Spacing {pvd_spacing}m', line=dict(color='royalblue', width=3)))
         fig.add_hline(y=90, line_dash="dash", line_color="red", annotation_text="90% Requirement")
-        fig.add_vline(x=target_time, line_dash="dot", line_color="green", annotation_text="Target Deadline")
-        fig.add_trace(go.Scatter(x=[target_time], y=[target_U], mode='markers', marker=dict(color='black', size=10), showlegend=False))
+        fig.add_vline(x=target_time, line_dash="dot", line_color="green", annotation_text=f"Target Deadline ({target_U:.1f}%)")
         
-        fig.update_layout(title="Radial Consolidation Curve (Hansbo)", xaxis_title="Time (Days)", yaxis_title="Degree of Consolidation U (%)", yaxis_range=[0, 105], height=400, margin=dict(l=20, r=20, t=40, b=20))
+        fig.update_layout(xaxis_title="Time (Days)", yaxis_title="Degree of Consolidation U (%)", yaxis_range=[0, 105], height=400, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig, use_container_width=True)
 
-    # TAB 2: LOGISTICS
+    # TAB 3: LOGISTICS
     with tab_log:
-        st.subheader("Construction Quantities & Logistics")
+        st.subheader("Compensated Earthworks Quantities")
+        st.caption("Calculations automatically account for the volume of dirt that sinks below surface level during settlement.")
+        
         df_logistics = pd.DataFrame({
             "Metric": [
                 "Treatment Area Footprint", 
-                "Average Existing Elevation",
+                "Base Fill Height (Theoretical)",
+                "Settlement Compensation Added",
+                "Actual Fill Height Required",
                 "Total Temporary Fill Volume", 
                 "Total Fill Tonnage (Approx)",
-                "Total PVDs Required (Points)", 
+                "Total PVDs Required", 
                 "Total Linear Meters of PVD"
             ],
             "Value": [
                 f"{pd_data['area_m2']:,.0f} m²",
-                f"{pd_data['baseline_elev']:.1f} m MSL",
+                f"{pd_data['base_height']:.2f} m",
+                f"+ {pd_data['S_design']:.3f} m",
+                f"{pd_data['actual_height']:.2f} m",
                 f"{pd_data['volume_m3']:,.0f} m³",
-                f"{pd_data['tonnage_t']:,.0f} Metric Tons",
+                f"{pd_data['tonnage_t']:,.0f} Tons",
                 f"{pd_data['pvd_count']:,.0f} drains",
-                f"{pd_data['pvd_length_m']:,.0f} linear meters"
+                f"{pd_data['pvd_length_m']:,.0f} linear m"
             ]
         })
         st.table(df_logistics)
-        
-        with st.expander("View Soil Profile"):
-            st.dataframe(df_zones, use_container_width=True)
 
-    # TAB 3: EXECUTION MAP
+    # TAB 4: MAP
     with tab_map:
         st.subheader("Treatment Footprint")
         c_lat_res = sum([p[1] for p in pd_data['polygon']]) / len(pd_data['polygon'])
         c_lon_res = sum([p[0] for p in pd_data['polygon']]) / len(pd_data['polygon'])
         
         m_res = folium.Map(location=[c_lat_res, c_lon_res], zoom_start=16, tiles='CartoDB Positron')
-        
-        # Add the footprint
         folium.Polygon(
             locations=[(p[1], p[0]) for p in pd_data['polygon']], 
             color='orange', weight=3, fill=True, fill_opacity=0.4,
-            tooltip=f"Surcharge Area: {pd_data['area_m2']:,.0f} m²<br>Height: {pd_data['req_fill_height']:.2f} m"
+            tooltip=f"Volume Required: {pd_data['volume_m3']:,.0f} m³"
         ).add_to(m_res)
         
         st_folium(m_res, width=1200, height=500, key="result_map")
