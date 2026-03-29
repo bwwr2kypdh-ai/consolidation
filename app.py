@@ -12,6 +12,8 @@ import json
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
+import scipy.interpolate as interp
+import scipy.ndimage as ndimage
 
 # ==========================================
 # 1. CONFIGURATION & STATE
@@ -118,9 +120,14 @@ gamma_fill = st.sidebar.number_input(tr("Densité Remblai [kN/m³]", "Fill Densi
 surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 3.0, 1.25)
 design_life = st.sidebar.number_input(tr("Durée de vie [Années]", "Design Life"), value=30)
 
-st.sidebar.header(tr("🗺️ Topographie API", "🗺️ DEM API"))
-api_choice = st.sidebar.selectbox("Source", ["Open-Meteo", "Google API", "Fichier CSV Local"])
+st.sidebar.header(tr("🗺️ Topographie & Rendu", "🗺️ Topography & Render"))
+api_choice = st.sidebar.selectbox("Source MNT", ["Open-Meteo", "Google API", "Fichier CSV Local"])
 api_key = st.sidebar.text_input("Clé API Google", type="password") if "Google" in api_choice else ""
+uploaded_mnt = st.sidebar.file_uploader("Import DEM CSV", type=['csv']) if "CSV" in api_choice else None
+
+st.sidebar.markdown("**Paramètres de Maillage & Rendu :**")
+grid_res_m = st.sidebar.slider("Résolution API (m)", 5.0, 100.0, 15.0, step=5.0, help="Distance entre les points scannés.")
+contour_step = st.sidebar.number_input("Équidistance des courbes (m)", min_value=0.05, max_value=5.0, value=0.5, step=0.05)
 
 # ==========================================
 # 5. CARTE DE SAISIE & ZONAGE INTELLIGENT
@@ -134,7 +141,6 @@ with col_map:
     tiles = {'Satellite': 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', 'Plan': 'CartoDB Positron', 'OSM': 'OpenStreetMap'}
     m = folium.Map(location=st.session_state['map_center'], zoom_start=15, tiles=tiles[map_style], attr='Esri')
     
-    # RECONSTRUCTION DES ZONES DESSINÉES DEPUIS LE JSON
     loaded_zones = []
     if st.session_state['project_data'] and 'zones' in st.session_state['project_data']:
         loaded_zones = st.session_state['project_data']['zones']
@@ -144,7 +150,6 @@ with col_map:
     Draw(export=True).add_to(m)
     output = st_folium(m, width=800, height=500, key="input_map")
 
-# EXTRACTION PRIORITAIRE : Si l'utilisateur a dessiné, on prend le dessin. Sinon, on prend le JSON.
 drawn_polygons = []
 if output and output.get("all_drawings"):
     drawn_polygons = [d["geometry"]["coordinates"][0] for d in output["all_drawings"]]
@@ -192,44 +197,53 @@ with bt2: btn_calc = st.button("🔄 2. CALCULER / MAJ ITÉRATIONS", use_contain
 
 if btn_api:
     with st.spinner("Extraction MNT (Réseau API)..."):
-        res_m = 15.0 / 111000.0
-        all_pts = []
-        for z in zones_params:
-            poly_obj = Polygon(z['coords'])
-            minx, miny, maxx, maxy = poly_obj.bounds
-            for lt in np.arange(miny, maxy + res_m, res_m):
-                for ln in np.arange(minx, maxx + res_m, res_m):
-                    if poly_obj.contains(Point(ln, lt)): all_pts.append((lt, ln))
-        
-        if all_pts:
-            elevs = []
-            chunk_size = 50 
+        if "CSV" in api_choice and uploaded_mnt:
+            try:
+                df_m = pd.read_csv(uploaded_mnt)
+                col_z = [c for c in df_m.columns if 'Z' in c.upper() or 'ELEV' in c.upper()][0]
+                df_m = df_m.rename(columns={col_z: 'Z'})
+                st.session_state['cached_mnt'] = df_m
+                st.success("MNT Local Chargé")
+            except Exception as e: st.error(f"Erreur CSV: {e}")
+        else:
+            res_deg = grid_res_m / 111000.0
+            all_pts = []
+            for z in zones_params:
+                poly_obj = Polygon(z['coords'])
+                minx, miny, maxx, maxy = poly_obj.bounds
+                for lt in np.arange(miny, maxy + res_deg, res_deg):
+                    for ln in np.arange(minx, maxx + res_deg, res_deg):
+                        if poly_obj.contains(Point(ln, lt)): all_pts.append((lt, ln))
             
-            if "Google" in api_choice and api_key:
-                for i in range(0, len(all_pts), chunk_size):
-                    chunk = all_pts[i:i+chunk_size]
-                    locs = "|".join([f"{lt},{ln}" for lt, ln in chunk])
-                    try:
-                        r = requests.get(f"https://maps.googleapis.com/maps/api/elevation/json?locations={locs}&key={api_key}").json()
-                        if r.get('status') == 'OK': elevs.extend([res['elevation'] for res in r['results']])
-                        else: elevs.extend([2.0]*len(chunk))
-                    except: elevs.extend([2.0]*len(chunk))
-                    time.sleep(0.1)
-            elif "Open-Meteo" in api_choice:
-                for i in range(0, len(all_pts), chunk_size):
-                    chunk = all_pts[i:i+chunk_size]
-                    lats_str, lons_str = ",".join([str(round(p[0], 5)) for p in chunk]), ",".join([str(round(p[1], 5)) for p in chunk])
-                    try:
-                        resp = requests.get(f"https://api.open-meteo.com/v1/elevation?latitude={lats_str}&longitude={lons_str}")
-                        if resp.status_code == 200: elevs.extend(resp.json().get('elevation', [2.0]*len(chunk)))
-                        else: elevs.extend([2.0]*len(chunk))
-                    except: elevs.extend([2.0]*len(chunk))
-                    time.sleep(0.1)
-            
-            if elevs and len(elevs) == len(all_pts):
-                st.session_state['cached_mnt'] = pd.DataFrame({'Lat': [p[0] for p in all_pts], 'Lon': [p[1] for p in all_pts], 'Z': elevs})
-                st.success("Topographie API enregistrée !")
-            else: st.error("Échec API.")
+            if all_pts:
+                elevs = []
+                chunk_size = 50 
+                
+                if "Google" in api_choice and api_key:
+                    for i in range(0, len(all_pts), chunk_size):
+                        chunk = all_pts[i:i+chunk_size]
+                        locs = "|".join([f"{lt},{ln}" for lt, ln in chunk])
+                        try:
+                            r = requests.get(f"https://maps.googleapis.com/maps/api/elevation/json?locations={locs}&key={api_key}").json()
+                            if r.get('status') == 'OK': elevs.extend([res['elevation'] for res in r['results']])
+                            else: elevs.extend([2.0]*len(chunk))
+                        except: elevs.extend([2.0]*len(chunk))
+                        time.sleep(0.1)
+                elif "Open-Meteo" in api_choice:
+                    for i in range(0, len(all_pts), chunk_size):
+                        chunk = all_pts[i:i+chunk_size]
+                        lats_str, lons_str = ",".join([str(round(p[0], 5)) for p in chunk]), ",".join([str(round(p[1], 5)) for p in chunk])
+                        try:
+                            resp = requests.get(f"https://api.open-meteo.com/v1/elevation?latitude={lats_str}&longitude={lons_str}")
+                            if resp.status_code == 200: elevs.extend(resp.json().get('elevation', [2.0]*len(chunk)))
+                            else: elevs.extend([2.0]*len(chunk))
+                        except: elevs.extend([2.0]*len(chunk))
+                        time.sleep(0.1)
+                
+                if elevs and len(elevs) == len(all_pts):
+                    st.session_state['cached_mnt'] = pd.DataFrame({'Lat': [p[0] for p in all_pts], 'Lon': [p[1] for p in all_pts], 'Z': elevs})
+                    st.success("Topographie API enregistrée !")
+                else: st.error("Échec API.")
 
 if btn_calc or (btn_api and st.session_state['cached_mnt'] is not None):
     if not zones_params or st.session_state['cached_mnt'] is None:
@@ -274,55 +288,64 @@ if st.session_state['project_data']:
     d = st.session_state['project_data']
     tabs = st.tabs(["🗺️ Topo & Contours", "⚠️ Tassements & Risques", "📍 Implantation PVD", "📉 Suivi & Coupes"])
 
-   # --- TAB 1: TOPO & CONTOURS ---
+    # --- TAB 1: TOPO ---
     with tabs[0]:
-        # Sécurité JSON Légacy
         z_mean = d['results']['Z_nat'].mean() if 'Z_nat' in d['results'].columns else 0.0
         st.write(f"Altitude Moyenne du terrain naturel : **{z_mean:.2f} m**")
         st.download_button("Export MNT CSV", d['mnt'].to_csv(index=False).encode('utf-8'), "site_topo.csv")
         
         c1, c2 = st.columns(2)
         with c1:
-            st.write("**Contours Topographiques (Matplotlib)**")
+            st.write("**Contours Topographiques (Lissés Scipy)**")
             z_std = d['mnt']['Z'].std()
-            
             if z_std < 0.05:
-                st.info("Le terrain scanné est parfaitement plat (Variation < 5 cm). Contours non affichés.")
+                st.info("Terrain plat (Variation < 5 cm). Contours non affichés.")
             else:
                 try:
-                    triang = tri.Triangulation(d['mnt']['Lon'], d['mnt']['Lat'])
+                    x, y, z_vals = d['mnt']['Lon'].values, d['mnt']['Lat'].values, d['mnt']['Z'].values
+                    xi = np.linspace(x.min(), x.max(), 150)
+                    yi = np.linspace(y.min(), y.max(), 150)
+                    X, Y = np.meshgrid(xi, yi)
+                    
+                    Z = interp.griddata((x, y), z_vals, (X, Y), method='cubic')
+                    Z = ndimage.gaussian_filter(Z, sigma=2.0)
+                    
+                    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
+                    levels_arr = np.arange(math.floor(z_min * 100) / 100.0, math.ceil(z_max * 100) / 100.0 + contour_step, contour_step)
+                    if len(levels_arr) < 2: levels_arr = 15 # Securité
+                    
                     fig, ax = plt.subplots()
-                    contour = ax.tricontourf(triang, d['mnt']['Z'], levels=15, cmap="terrain")
-                    ax.tricontour(triang, d['mnt']['Z'], levels=15, colors='k', linewidths=0.3, alpha=0.5)
-                    plt.colorbar(contour, ax=ax, label="Élévation (m)"); ax.set_xticks([]); ax.set_yticks([])
+                    contour = ax.contourf(X, Y, Z, levels=levels_arr, cmap="terrain", extend="both")
+                    ax.contour(X, Y, Z, levels=levels_arr, colors='k', linewidths=0.3, alpha=0.5)
+                    plt.colorbar(contour, ax=ax, label="Élévation (m)")
+                    ax.set_xticks([]); ax.set_yticks([])
                     for spine in ax.spines.values(): spine.set_visible(False)
                     st.pyplot(fig); plt.close()
-                except Exception as e: 
-                    st.warning(f"Contours indisponibles : {e}")
+                except Exception as e: st.warning(f"Contours indisponibles : {e}")
 
         with c2:
-            st.write("**Grille de Précision (Maillage API)**")
+            st.write("**Grille API (Points Bruts)**")
             m_mnt = folium.Map(location=[d['mnt']['Lat'].mean(), d['mnt']['Lon'].mean()], zoom_start=16, tiles='CartoDB Positron')
             for z in d['zones']: folium.Polygon(locations=[(p[1], p[0]) for p in z['coords']], color='orange', weight=2, fill=False).add_to(m_mnt)
-            
-            lats_g = sorted(d['mnt']['Lat'].unique())[::4]
-            lons_g = sorted(d['mnt']['Lon'].unique())[::4]
+            lats_g = sorted(d['mnt']['Lat'].unique())[::4]; lons_g = sorted(d['mnt']['Lon'].unique())[::4]
             df_txt = d['mnt'][d['mnt']['Lat'].isin(lats_g) & d['mnt']['Lon'].isin(lons_g)]
-            
             for _, r in df_txt.iterrows():
-                folium.Marker(
-                    [r['Lat'], r['Lon']], 
-                    icon=folium.DivIcon(html=f'<div style="font-size:10px; color:darkred; font-weight:bold; transform:translate(-50%,-50%); text-shadow:1px 1px white,-1px -1px white;">{r["Z"]:.1f}</div>')
-                ).add_to(m_mnt)
+                folium.Marker([r['Lat'], r['Lon']], icon=folium.DivIcon(html=f'<div style="font-size:11px; color:darkred; font-weight:bold; transform:translate(-50%,-50%); text-shadow:1px 1px white,-1px -1px white;">{r["Z"]:.1f}</div>')).add_to(m_mnt)
             st_folium(m_mnt, width=600, height=400, key="mnt_inspect")
 
     # --- TAB 2: TASSEMENTS ---
     with tabs[1]:
-        st.dataframe(d['results'].style.format({"Z_nat": "{:.2f}", "S_max": "{:.2f}", "Vol": "{:.0f}", "FS": "{:.2f}", "H_fill": "{:.2f}"}), use_container_width=True)
+        # Formattage propre sans erreur
+        res_display = d['results'].copy()
+        for col in ['Z_nat', 'S_max', 'FS', 'H_fill']:
+            if col in res_display.columns: res_display[col] = res_display[col].round(2)
+        if 'Vol' in res_display.columns: res_display['Vol'] = res_display['Vol'].round(0)
+        st.dataframe(res_display, use_container_width=True)
+        
         for idx, row in d['results'].iterrows():
             with st.container():
                 st.markdown(f"**Zone {int(row['Zone'])}**")
-                s_oedo, s_cpt, s_spt = row.get('S_oedo', row['S_max']), row.get('S_cpt', row['S_max']), row.get('S_spt', row['S_max'])
+                s_oedo, s_cpt, s_spt = row.get('S_oedo', row.get('S_max', 0.0)), row.get('S_cpt', row.get('S_max', 0.0)), row.get('S_spt', row.get('S_max', 0.0))
                 fs_val = row.get('FS', row.get('FS_Mudwave', 999.0))
                 
                 c_1, c_2 = st.columns(2)
@@ -330,9 +353,10 @@ if st.session_state['project_data']:
                     fig_c = go.Figure(data=[go.Bar(name='Oedo', x=['Modèles'], y=[s_oedo]), go.Bar(name='CPTu', x=['Modèles'], y=[s_cpt]), go.Bar(name='SPT', x=['Modèles'], y=[s_spt])])
                     fig_c.update_layout(height=250, margin=dict(t=30, b=0)); st.plotly_chart(fig_c, use_container_width=True)
                 with c_2:
+                    su_zone = d['zones'][idx].get('Su', 15.0)
                     if fs_val < 1.3:
                         st.error(f"🚨 RISQUE MUDWAVE ! FS = {fs_val:.2f}")
-                        st.info(f"💡 Conseil : Levée maximale de {(5.14*d['zones'][idx].get('Su', 15.0))/(gamma_fill*1.3):.2f}m.")
+                        st.info(f"💡 Conseil : Levée maximale de {(5.14*su_zone)/(gamma_fill*1.3):.2f}m.")
                     else: st.success(f"✅ FS Mudwave Stable ({fs_val:.2f})")
 
     # --- TAB 3: PVD ---
