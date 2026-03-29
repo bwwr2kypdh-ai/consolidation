@@ -96,7 +96,6 @@ if st.sidebar.button(tr("Se déconnecter 🚪", "Logout")): st.session_state["au
 
 st.title(tr("⚓ Port Terminal - SIG Géotechnique PRO", "⚓ Port Terminal - PRO Geotechnical GIS"))
 
-# Sélecteur de fond de carte robuste
 map_style = st.radio(tr("Vue de la carte :", "Map View :"), ["Satellite (Esri)", "Plan (CartoDB)", "OSM"], horizontal=True)
 tiles_dict = {"Satellite (Esri)": 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', "Plan (CartoDB)": 'CartoDB Positron', "OSM": 'OpenStreetMap'}
 attr_dict = {"Satellite (Esri)": 'Esri', "Plan (CartoDB)": 'CartoDB', "OSM": 'OSM'}
@@ -120,7 +119,6 @@ with st.sidebar.expander(tr("💾 Sauvegarder / Charger (JSON)", "💾 Save / Lo
     if uploaded_file is not None:
         try:
             saved_state = json.load(uploaded_file)
-            # Reconstruct DataFrames from JSON strings
             pd_data = saved_state.get('project_data', None)
             if pd_data:
                 pd_data['mnt'] = pd.read_json(pd_data['mnt']) if pd_data.get('mnt') else None
@@ -132,7 +130,6 @@ with st.sidebar.expander(tr("💾 Sauvegarder / Charger (JSON)", "💾 Save / Lo
         
     if st.session_state['project_data'] is not None:
         export_data = st.session_state['project_data'].copy()
-        # Convert DataFrames to JSON for safe export
         export_data['mnt'] = export_data['mnt'].to_json() if isinstance(export_data.get('mnt'), pd.DataFrame) else None
         export_data['pvds'] = export_data['pvds'].to_json() if isinstance(export_data.get('pvds'), pd.DataFrame) else None
         export_data['results'] = export_data['results'].to_json() if isinstance(export_data.get('results'), pd.DataFrame) else None
@@ -188,17 +185,14 @@ with col_action:
                 target_load = final_load * surcharge_ratio
                 base_fill = target_load / gamma_fill
                 
-                # --- ACQUISITION MNT ---
                 df_mnt = None
                 if "CSV" in api_choice and uploaded_mnt is not None:
                     try:
                         df_mnt = pd.read_csv(uploaded_mnt)
-                        # S'assurer que les colonnes s'appellent Lat, Lon, Z
                         col_z = [c for c in df_mnt.columns if 'Z' in c.upper() or 'ELEV' in c.upper()][0]
                         df_mnt = df_mnt.rename(columns={col_z: 'Z'})
                     except Exception as e: st.error(f"Erreur CSV: {e}")
                 else:
-                    # Bounding box globale
                     all_pts = [pt for zone in zones_data for pt in zone['coords']]
                     min_lon, max_lon = min(p[0] for p in all_pts), max(p[0] for p in all_pts)
                     min_lat, max_lat = min(p[1] for p in all_pts), max(p[1] for p in all_pts)
@@ -224,26 +218,21 @@ with col_action:
                             if 'elevation' in r: elevs = r['elevation']
                         except: pass
                     
-                    if elevs and len(elevs) == len(mnt_pts):
-                        df_mnt = pd.DataFrame({'Lat': [p[0] for p in mnt_pts], 'Lon': [p[1] for p in mnt_pts], 'Z': elevs})
+                    if elevs and len(elevs) == len(mnt_pts): df_mnt = pd.DataFrame({'Lat': [p[0] for p in mnt_pts], 'Lon': [p[1] for p in mnt_pts], 'Z': elevs})
                     else:
-                        # Fallback générique si l'API échoue pour ne pas bloquer l'outil
                         elevs = [2.0 + math.sin(lt*1000) for lt, ln in mnt_pts]
                         df_mnt = pd.DataFrame({'Lat': [p[0] for p in mnt_pts], 'Lon': [p[1] for p in mnt_pts], 'Z': elevs})
 
-                # --- CALCULS PAR ZONE ---
                 results_zones = []
                 all_pvds = pd.DataFrame()
                 
                 for z in zones_data:
                     poly = Polygon(z['coords'])
                     area = poly.area * (111000**2) * math.cos(math.radians(poly.centroid.y))
-                    
                     S_max = calc_settlement(z, target_load)
                     S_sec = calc_secondary_compression(z['C_alpha'], z['H'], target_time, design_life)
                     actual_fill = base_fill + S_max
                     vol = area * actual_fill
-                    
                     q_ult = 5.14 * z['Su']
                     FS_mudwave = q_ult / (gamma_fill * actual_fill) if actual_fill > 0 else 999
                     
@@ -258,13 +247,9 @@ with col_action:
                         'Fill_H': actual_fill, 'Vol': vol, 'FS_Mudwave': FS_mudwave, 'PVD_Count': len(df_pvd)
                     })
                 
-                # CRITIQUE : Enregistrement de TOUTES les données dans le dictionnaire
                 st.session_state['project_data'] = {
-                    'zones': zones_data, 
-                    'results': pd.DataFrame(results_zones), 
-                    'pvds': all_pvds, 
-                    'mnt': df_mnt, 
-                    'target_load': target_load
+                    'zones': zones_data, 'results': pd.DataFrame(results_zones), 
+                    'pvds': all_pvds, 'mnt': df_mnt, 'target_load': target_load
                 }
                 st.success(tr("Analyse SIG Terminée !", "GIS Analysis Complete!"))
 
@@ -275,28 +260,26 @@ if st.session_state['project_data'] is not None:
     d = st.session_state['project_data']
     st.markdown("---")
     
-    t_topo, t_pvd, t_coupe, t_suivi, t_risk = st.tabs([
-        tr("🗺️ Cartes (Isolignes)", "🗺️ Maps (Contours)"), 
+    t_topo, t_pvd, t_coupe, t_suivi, t_risk, t_map = st.tabs([
+        tr("🗺️ Topographie & Tassements", "🗺️ Topography & Settlement"), 
         tr("📍 Implantation PVD", "📍 PVD Layout"), 
         tr("📐 Vues en Coupe", "📐 Cross Sections"),
-        tr("📉 Suivi (Asaoka)", "📉 Monitoring (Asaoka)"),
-        tr("⚠️ Risques", "⚠️ Risks")
+        tr("📉 Suivi (Asaoka & Lifts)", "📉 Monitoring & Lifts"),
+        tr("⚠️ Risques", "⚠️ Risks"),
+        tr("📍 Carte d'Exécution", "📍 Execution Map")
     ])
     
     # --- ONGLET 1 : CONTOURS (MNT & TASSEMENTS) ---
     with t_topo:
         st.subheader(tr("Modèle Numérique de Terrain & Déformations", "DEM & Deformation Models"))
         
-        # Le bouton d'export MNT est bien là !
         if d['mnt'] is not None and not d['mnt'].empty:
             csv_mnt = d['mnt'].to_csv(index=False).encode('utf-8')
             st.download_button(tr("📥 Télécharger le MNT Actuel (CSV)", "📥 Download Current DEM (CSV)"), data=csv_mnt, file_name='projet_mnt_sauvegarde.csv', mime='text/csv')
             
             c1, c2 = st.columns(2)
             try:
-                # Triangulation Matplotlib
                 triang = tri.Triangulation(d['mnt']['Lon'], d['mnt']['Lat'])
-                
                 with c1:
                     st.write("**Topographie Initiale (Z)**")
                     fig, ax = plt.subplots(figsize=(8, 6))
@@ -325,7 +308,39 @@ if st.session_state['project_data'] is not None:
                         ax2.plot(x, y, color='black', linewidth=1)
                     st.pyplot(fig2)
             except Exception as e:
-                st.warning(tr(f"Impossible de tracer les isolignes (pas assez de points MNT): {e}", f"Cannot draw contours: {e}"))
+                st.warning(tr(f"Impossible de tracer les isolignes : {e}", f"Cannot draw contours : {e}"))
+            
+            # --- LA NOUVELLE CARTE DEMANDÉE : MAILLAGE API ET ÉLÉVATIONS ---
+            st.markdown("---")
+            st.write(tr("**Carte Interactive du Maillage MNT (Points API)**", "**Interactive DEM Grid Map**"))
+            
+            c_lat_mnt = d['mnt']['Lat'].mean()
+            c_lon_mnt = d['mnt']['Lon'].mean()
+            m_mnt = folium.Map(location=[c_lat_mnt, c_lon_mnt], zoom_start=16, tiles='CartoDB Positron')
+            
+            # Dessiner les polygones
+            for z in d['zones']:
+                folium.Polygon(locations=[(p[1], p[0]) for p in z['coords']], color='orange', weight=2, fill=False).add_to(m_mnt)
+            
+            # Dessiner le maillage complet (petits points)
+            for idx, row in d['mnt'].iterrows():
+                folium.CircleMarker(location=[row['Lat'], row['Lon']], radius=1, color='blue', fill=True).add_to(m_mnt)
+                
+            # Dessiner les textes (espacement 5x moindre)
+            res = 15.0 / 111000.0
+            res_5x = res * 5
+            df_text = d['mnt'].copy()
+            df_text['Lat_bin'] = (df_text['Lat'] / res_5x).round() * res_5x
+            df_text['Lon_bin'] = (df_text['Lon'] / res_5x).round() * res_5x
+            df_text = df_text.drop_duplicates(subset=['Lat_bin', 'Lon_bin'])
+            
+            for idx, row in df_text.iterrows():
+                folium.Marker(
+                    location=[row['Lat'], row['Lon']],
+                    icon=folium.DivIcon(html=f'<div style="font-size: 10px; font-weight: bold; color: darkred; text-shadow: 1px 1px 2px white;">{row["Z"]:.1f}</div>')
+                ).add_to(m_mnt)
+                
+            st_folium(m_mnt, width=1200, height=500, key="mnt_grid_map")
 
     # --- ONGLET 2 : IMPLANTATION PVD ---
     with t_pvd:
@@ -338,7 +353,7 @@ if st.session_state['project_data'] is not None:
             for z in d['zones']:
                 x, y = Polygon(z['coords']).exterior.xy
                 fig_pvd.add_trace(go.Scattermapbox(lat=list(y), lon=list(x), mode='lines', line=dict(width=2, color='red'), name=f"Zone {z['id']}"))
-            fig_pvd.add_trace(go.Scattermapbox(lat=d['pvds']['Lat'], lon=d['pvds']['Lon'], mode='markers', marker=go.scattermapbox.Marker(size=4, color='blue'), name="PVDs"))
+            fig_pvd.add_trace(go.Scattermapbox(lat=d['pvds']['Lat'], lon=d['pvds']['Lon'], mode='markers', marker=go.scattermapbox.Marker(size=4, color='blue'), name="Points PVD"))
             fig_pvd.update_layout(mapbox_style="carto-positron", mapbox_zoom=16, mapbox_center={"lat": d['pvds']['Lat'].mean(), "lon": d['pvds']['Lon'].mean()}, height=600)
             st.plotly_chart(fig_pvd, use_container_width=True)
             st.dataframe(d['results'], use_container_width=True)
@@ -357,20 +372,28 @@ if st.session_state['project_data'] is not None:
         fig_coupe.update_layout(title=f"Coupe Transversale - {zone_sel}", xaxis_title="Distance (m)", yaxis_title="Élévation (m)", height=400)
         st.plotly_chart(fig_coupe, use_container_width=True)
 
-    # --- ONGLET 4 : MONITORING REEL VS DESIGN ---
+    # --- ONGLET 4 : MONITORING REEL VS DESIGN & LIFTS ---
     with t_suivi:
-        st.subheader("Monitoring : Suivi des Tassements (Asaoka)")
+        st.subheader("Monitoring & Exécution")
         zone_suivi = st.selectbox("Sélectionner la Zone monitorée :", [f"Zone {z['id']}" for z in d['zones']], key="suivi_zone")
         zs_idx = int(zone_suivi.split(" ")[1]) - 1
-        z_suivi_data, S_max_theorique = d['zones'][zs_idx], d['results'].iloc[zs_idx]['S_max']
+        z_suivi_data, res_suivi = d['zones'][zs_idx], d['results'].iloc[zs_idx]
+        S_max_theorique = res_suivi['S_max']
+        H_act_requis = res_suivi['Fill_H']
         
         c_m1, c_m2 = st.columns([1, 2])
+        
         with c_m1:
-            st.write("**Relevés Terrain**")
+            st.write("**Phasage de Remblai (Lifts)**")
+            df_l = pd.DataFrame({'Jour': [0, 15, 45, 75], 'Levée_m': [0.5, 1.5, 1.5, 1.0]})
+            e_lifts = st.data_editor(df_l, num_rows="dynamic", use_container_width=True, key=f"lifts_{zs_idx}").sort_values(by='Jour')
+            
+            st.write("**Relevés Tassement (Asaoka)**")
             df_m = pd.DataFrame({'Jour': [0, 15, 30, 45, 60], 'Relevé (m)': [0.0, 0.10, 0.25, 0.40, 0.55]})
-            e_mon = st.data_editor(df_m, num_rows="dynamic", use_container_width=True).sort_values(by='Jour')
+            e_mon = st.data_editor(df_m, num_rows="dynamic", use_container_width=True, key=f"mon_{zs_idx}").sort_values(by='Jour')
         
         with c_m2:
+            st.write("**Graphe de Consolidation : Design vs Réalité**")
             days = np.linspace(0, target_time * 1.5, 100)
             S_th = [hansbo_consolidation(z_suivi_data['ch'], z_suivi_data['spacing'], t) * S_max_theorique for t in days]
             
@@ -382,11 +405,18 @@ if st.session_state['project_data'] is not None:
                 s_ult, _, _, _, _ = calculate_asaoka(e_mon['Jour'].values, e_mon['Relevé (m)'].values, 15)
                 if s_ult:
                     fig_suivi.add_hline(y=s_ult, line_color="orange", annotation_text=f"Asaoka Réel ({s_ult:.2f}m)")
-                    if s_ult > S_max_theorique * 1.15: st.error(f"🚨 DÉVIATION MAJEURE DÉTECTÉE : Projection Asaoka ({s_ult:.2f}m) dépasse le design ({S_max_theorique:.2f}m) de plus de 15%.")
+                    if s_ult > S_max_theorique * 1.15: st.error(f"🚨 DÉVIATION : L'Asaoka réel ({s_ult:.2f}m) dépasse le design ({S_max_theorique:.2f}m).")
             
             fig_suivi.add_hline(y=S_max_theorique, line_color="blue", annotation_text=f"S_ult Théorique ({S_max_theorique:.2f}m)")
-            fig_suivi.update_layout(title="Consolidation : Design vs Réalité", xaxis_title="Temps (Jours)", yaxis_title="Tassement (m)", height=450)
+            fig_suivi.update_layout(xaxis_title="Temps (Jours)", yaxis_title="Tassement (m)", height=400)
             st.plotly_chart(fig_suivi, use_container_width=True)
+            
+            st.write("**Chronogramme des Levées**")
+            e_lifts['Cumul'] = e_lifts['Levée_m'].cumsum()
+            f_ex = go.Figure(go.Scatter(x=e_lifts['Jour'], y=e_lifts['Cumul'], mode='lines+markers', line_shape='hv', line=dict(color='orange', width=4)))
+            f_ex.add_hline(y=H_act_requis, line_dash="dash", line_color="red", annotation_text=f"Cible ({H_act_requis:.2f} m)")
+            f_ex.update_layout(xaxis_title="Jours", yaxis_title="Hauteur (m)", height=300)
+            st.plotly_chart(f_ex, use_container_width=True)
 
     # --- ONGLET 5 : RISQUES (MUDWAVE & FLUAGE) ---
     with t_risk:
@@ -401,3 +431,20 @@ if st.session_state['project_data'] is not None:
                 st.write(f"FS Mudwave : {res['FS_Mudwave']:.2f}")
                 if res['FS_Mudwave'] < 1.3: st.error(f"Risque de rupture. Levées progressives obligatoires.")
             st.markdown("---")
+            
+    # --- TAB 6: RESULT MAP ---
+    with t_map:
+        st.subheader(tr("Carte d'Exécution Générale", "General Execution Map"))
+        res_map_style = st.radio(tr("Vue :", "View :"), ["Plan Clair (CartoDB)", "Satellite (Esri)", "Plan Standard (OSM)"], horizontal=True, key="res_map_style")
+        if "Satellite" in res_map_style: res_tiles, res_attr = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', 'Esri'
+        elif "Standard" in res_map_style: res_tiles, res_attr = 'OpenStreetMap', 'OSM'
+        else: res_tiles, res_attr = 'CartoDB Positron', 'CartoDB'
+
+        c_lat_res = sum([p[1] for z in d['zones'] for p in z['coords']]) / sum([len(z['coords']) for z in d['zones']])
+        c_lon_res = sum([p[0] for z in d['zones'] for p in z['coords']]) / sum([len(z['coords']) for z in d['zones']])
+        
+        m_res = folium.Map(location=[c_lat_res, c_lon_res], zoom_start=16, tiles=res_tiles, attr=res_attr)
+        for z in d['zones']:
+            folium.Polygon(locations=[(p[1], p[0]) for p in z['coords']], color='orange', weight=3, fill=True, fill_opacity=0.4, tooltip=f"Zone {z['id']}").add_to(m_res)
+        
+        st_folium(m_res, width=1200, height=500, key="result_map")
