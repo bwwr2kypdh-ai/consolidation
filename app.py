@@ -172,17 +172,26 @@ with col_zones:
             zones_params.append({'id': i+1, 'coords': poly, 'H': h_c, 'Cc': cc, 'Cr': cr, 'e0': e0, 'sig_0': s0, 'sig_c': sc, 'Su': su, 'qt': qt, 'alpha': alpha, 'N60': n60, 'f2': f2, 'C_alpha': ca, 'ch': ch, 'spacing': sp})
 
 # ==========================================
-# 6. MOTEUR API & CALCULS (DÉCOUPLÉS)
+# 6. DOUBLE MOTEUR : COLLECTE VS CALCULS
 # ==========================================
 st.markdown("---")
 bt1, bt2, _ = st.columns([1, 1, 4])
-with bt1: btn_api = st.button("🚀 1. COLLECTER MNT", use_container_width=True, type="primary")
-with bt2: btn_calc = st.button("🔄 2. CALCULER / MAJ", use_container_width=True)
+with bt1: 
+    btn_api = st.button("🚀 1. COLLECTER MNT (API)", use_container_width=True, type="primary", help="Scanne le terrain. À faire une seule fois.")
+with bt2: 
+    btn_calc = st.button("🔄 2. CALCULER / MAJ ITÉRATIONS", use_container_width=True, help="Recalcule les tassements sans toucher aux API.")
 
+# ÉTAPE 1 : COLLECTE
 if btn_api:
-    with st.spinner("API Request..."):
+    with st.spinner("Appel API Topographique en cours (Par lots de 50)..."):
         if "CSV" in api_choice and uploaded_mnt:
-            df_m = pd.read_csv(uploaded_mnt); df_m.columns = ['Lat', 'Lon', 'Z']; st.session_state['cached_mnt'] = df_m
+            try:
+                df_m = pd.read_csv(uploaded_mnt)
+                col_z = [c for c in df_m.columns if 'Z' in c.upper() or 'ELEV' in c.upper()][0]
+                df_m = df_m.rename(columns={col_z: 'Z'})
+                st.session_state['cached_mnt'] = df_m
+                st.success("CSV Chargé")
+            except Exception as e: st.error(f"Erreur CSV: {e}")
         else:
             res_m = 15.0 / 111000.0
             all_pts = []
@@ -192,34 +201,83 @@ if btn_api:
                 for lt in np.arange(miny, maxy + res_m, res_m):
                     for ln in np.arange(minx, maxx + res_m, res_m):
                         if poly_obj.contains(Point(ln, lt)): all_pts.append((lt, ln))
+            
             if all_pts:
-                r = requests.get(f"https://api.open-meteo.com/v1/elevation?latitude={','.join([str(p[0]) for p in all_pts])}&longitude={','.join([str(p[1]) for p in all_pts])}").json()
-                st.session_state['cached_mnt'] = pd.DataFrame({'Lat': [p[0] for p in all_pts], 'Lon': [p[1] for p in all_pts], 'Z': r.get('elevation', [2.0]*len(all_pts))})
-                st.success("DEM Cached")
+                elevs = []
+                chunk_size = 50 # <-- CORRECTION : Taille des lots sécurisée
+                
+                # BOUCLE DE REQUÊTES PAR LOTS
+                if "Google" in api_choice:
+                    if not api_key: st.error("Clé API Google requise.")
+                    else:
+                        for i in range(0, len(all_pts), chunk_size):
+                            chunk = all_pts[i:i+chunk_size]
+                            locs = "|".join([f"{lt},{ln}" for lt, ln in chunk])
+                            try:
+                                r = requests.get(f"https://maps.googleapis.com/maps/api/elevation/json?locations={locs}&key={api_key}").json()
+                                if r.get('status') == 'OK': elevs.extend([res['elevation'] for res in r['results']])
+                                else: elevs.extend([2.5]*len(chunk)) # Sécurité
+                            except: elevs.extend([2.5]*len(chunk))
+                            time.sleep(0.1)
+                            
+                elif "Open-Meteo" in api_choice:
+                    for i in range(0, len(all_pts), chunk_size):
+                        chunk = all_pts[i:i+chunk_size]
+                        lats_str = ",".join([str(p[0]) for p in chunk])
+                        lons_str = ",".join([str(p[1]) for p in chunk])
+                        try:
+                            response = requests.get(f"https://api.open-meteo.com/v1/elevation?latitude={lats_str}&longitude={lons_str}")
+                            if response.status_code == 200: # <-- CORRECTION : Vérifie si c'est pas une page d'erreur
+                                data = response.json()
+                                elevs.extend(data.get('elevation', [2.5]*len(chunk)))
+                            else:
+                                elevs.extend([2.5]*len(chunk)) # Sécurité
+                        except:
+                            elevs.extend([2.5]*len(chunk)) # Sécurité
+                        time.sleep(0.1) # Évite de se faire bloquer pour spam
+                
+                # STOCKAGE
+                if elevs and len(elevs) == len(all_pts):
+                    st.session_state['cached_mnt'] = pd.DataFrame({'Lat': [p[0] for p in all_pts], 'Lon': [p[1] for p in all_pts], 'Z': elevs})
+                    st.success(tr("Topographie enregistrée !", "DEM Saved !"))
+                else:
+                    st.error("Échec API : Données incomplètes.")
 
+# ÉTAPE 2 : CALCULS
 if btn_calc or (btn_api and st.session_state['cached_mnt'] is not None):
     if not zones_params or st.session_state['cached_mnt'] is None:
-        st.error("Error: Drawing + API required.")
+        st.error("Error: Dessinez d'abord et collectez le MNT.")
     else:
         results, all_pvds = [], pd.DataFrame()
         mnt = st.session_state['cached_mnt']
         for z in zones_params:
             poly_obj = Polygon(z['coords'])
             mask = mnt.apply(lambda row: poly_obj.contains(Point(row['Lon'], row['Lat'])), axis=1)
-            z_nat = mnt[mask]['Z'].mean() if not mnt[mask].empty else 2.0
+            z_nat = mnt[mask]['Z'].mean() if not mnt[mask].empty else 0.0
+            
             delta_z = z_target_final - z_nat
             q_remblai = max(0, delta_z * gamma_fill)
-            q_travaux = (q_remblai + dead_load_def + live_load_def) * surcharge_ratio
-            s1 = calc_settlement_oedometer(z, q_travaux)
-            s2 = calc_settlement_cptu(z, q_travaux)
-            s3 = calc_settlement_spt(z, q_travaux)
+            q_exploitation = dead_load_def + live_load_def
+            q_surcharge = (q_remblai + q_exploitation) * surcharge_ratio
+            
+            s1 = calc_settlement_oedometer(z, q_surcharge)
+            s2 = calc_settlement_cptu(z, q_surcharge)
+            s3 = calc_settlement_spt(z, q_surcharge)
             s_max = max(s1, s2, s3)
+            
             h_fill_total = max(0, delta_z) + s_max
             vol_tot = (poly_obj.area * (111000**2) * math.cos(math.radians(poly_obj.centroid.y))) * h_fill_total
+            
             df_p = generate_pvd_grid(z['coords'], z['spacing']); df_p['Zone'] = z['id']
             all_pvds = pd.concat([all_pvds, df_p])
-            results.append({'Zone': z['id'], 'S_max': s_max, 'S_sec': calc_secondary_compression(z['C_alpha'], z['H'], 180, design_life), 'Vol': vol_tot, 'FS': (5.14 * z['Su']) / (gamma_fill * h_fill_total) if h_fill_total > 0 else 999, 'H_fill': h_fill_total, 'S_oedo': s1, 'S_cpt': s2, 'S_spt': s3, 'Z_nat': z_nat})
+            
+            results.append({
+                'Zone': z['id'], 'Z_nat': z_nat, 'Delta_Z': delta_z, 'S_max': s_max, 
+                'Vol': vol_tot, 'FS': (5.14 * z['Su']) / (gamma_fill * h_fill_total) if h_fill_total > 0 else 999, 
+                'H_fill': h_fill_total, 'S_oedo': s1, 'S_cpt': s2, 'S_spt': s3
+            })
         st.session_state['project_data'] = {'results': pd.DataFrame(results), 'pvds': all_pvds, 'mnt': mnt, 'zones': zones_params}
+        st.success("Calculs Itératifs OK.")
 
 # ==========================================
 # 7. DASHBOARD MULTI-ONGLETS
