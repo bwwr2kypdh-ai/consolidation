@@ -27,40 +27,30 @@ st.markdown("""
 # ==========================================
 # 2. AUTHENTICATION (CALLBACK PATTERN)
 # ==========================================
-def check_password():
-    # This function runs instantly when the user presses Enter
-    def password_entered():
-        if st.session_state["pwd_input"].strip().lower() == "admin":
+if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
+if not st.session_state["authenticated"]:
+    st.title("🔒 Accès Sécurisé - Simulateur Portuaire")
+    with st.form("login_form"):
+        if st.form_submit_button("Se connecter") and st.text_input("Code d'accès :", type="password") in st.secrets.get("passwords", {"default": "admin"}).values():
             st.session_state["authenticated"] = True
-            del st.session_state["pwd_input"]  # Clear the password from memory securely
-        else:
-            st.session_state["authenticated"] = False
+            st.rerun() 
+        else: st.info("Entrez le mot de passe (par défaut: admin)")
+    st.stop()
 
-    # If not logged in, show the prompt
-    if not st.session_state.get("authenticated", False):
-        st.title("🔒 Secure Access - Geotechnical Portal")
-        
-        # The key="pwd_input" links this input directly to the session state
-        st.text_input(
-            "Access Code (Type 'admin' and press Enter):", 
-            type="password", 
-            on_change=password_entered, 
-            key="pwd_input"
-        )
-        
-        # Show error only if they made an attempt and it was flagged as False
-        if "authenticated" in st.session_state and not st.session_state["authenticated"]:
-            st.error("Incorrect Password. Please try again.")
-            
-        st.stop()  # Halt the app here until authenticated
+st.title("")
+if st.sidebar.button("Se déconnecter 🚪"): st.session_state["authenticated"] = False; st.rerun()
 
-# Run the security check
-check_password()
-
-# Provide a logout button in the sidebar
-if st.sidebar.button("Logout 🚪"):
-    st.session_state["authenticated"] = False
-    st.rerun()
+# --- MEMOIRE DE SESSION --- 
+if 'raw_df' not in st.session_state: 
+    st.session_state['raw_df'] = None 
+if 'geoms' not in st.session_state: 
+    st.session_state['geoms'] = {'poly': None} 
+if 'map_center' not in st.session_state: 
+    st.session_state['map_center'] = [43.2965, 5.3698] 
+if 'last_buffer' not in st.session_state: 
+    st.session_state['last_buffer'] = 50 
+if 'rect_data' not in st.session_state:
+    st.session_state['rect_data'] = {'coords': [], 'area': 0.0, 'type': 'Rectangle'}
 
 # ==========================================
 # 3. CORE ENGINEERING MATH
