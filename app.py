@@ -26,25 +26,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. AUTHENTICATION (BUG FIXED)
+# 2. AUTHENTICATION (BULLETPROOF VERSION)
 # ==========================================
 if "authenticated" not in st.session_state: 
     st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
     st.title("🔒 Secure Access - Geotechnical Portal")
-    with st.form("login_form"):
-        passcode = st.text_input("Access Code (Hint: admin):", type="password")
-        submitted = st.form_submit_button("Login")
-        
-        # FIX: Only check credentials IF the button was actually clicked
-        if submitted:
-            if passcode == "admin":
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect Password. Please try again.")
-    st.stop()
+    
+    # Removed st.form to prevent state-sync lag on 'Enter' key presses
+    passcode = st.text_input("Access Code (Hint: admin):", type="password")
+    
+    # Listen for the button click
+    if st.button("Login", type="primary"):
+        # .strip() removes invisible spaces, .lower() ignores Caps Lock
+        if passcode.strip().lower() == "admin":
+            st.session_state["authenticated"] = True
+            st.rerun()
+        elif passcode: # Only show error if they actually typed something
+            st.error("Incorrect Password. Please try again.")
+            
+    st.stop() # Halts execution of the rest of the app until logged in
 
 if st.sidebar.button("Logout 🚪"): 
     st.session_state["authenticated"] = False
