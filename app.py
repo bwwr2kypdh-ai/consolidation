@@ -275,10 +275,14 @@ if st.session_state['project_data']:
     tabs = st.tabs(["🗺️ Topo & Contours", "⚠️ Tassements & Risques", "📍 Implantation PVD", "📉 Suivi & Coupes"])
 
     # --- TAB 1: TOPO ---
+
     with tabs[0]:
-        st.write(f"Altitude Moyenne du terrain naturel : **{d['results']['Z_nat'].mean():.2f} m**")
+        # --- SÉCURITÉ JSON LÉGACY : Calcule la moyenne uniquement si Z_nat existe ---
+        z_mean = d['results']['Z_nat'].mean() if 'Z_nat' in d['results'].columns else 0.0
+        st.write(f"Altitude Moyenne du terrain naturel : **{z_mean:.2f} m**")
+        
         c1, c2 = st.columns(2)
-        with c1:
+        # ... (la suite du code avec z_std = d['mnt']['Z'].std() etc. reste identique)
             z_std = d['mnt']['Z'].std()
             if z_std < 0.1: # Sécurité : Si écart < 10cm, terrain plat
                 st.info("Terrain plat. Pas de variations suffisantes pour générer des courbes de niveau.")
