@@ -115,14 +115,14 @@ with st.sidebar.expander(tr("💾 Sauvegarder / Charger (JSON)", "💾 Save / Lo
                 pd_data['results'] = pd.read_json(pd_data['results']) if pd_data.get('results') else None
                 st.session_state['project_data'] = pd_data
             st.success(tr("Projet chargé !", "Project loaded!"))
-        except Exception as e: st.error(f"Erreur: {e}")
+        except Exception as e: st.error(f"Erreur/Error: {e}")
         
     if st.session_state['project_data'] is not None:
         export_data = st.session_state['project_data'].copy()
         export_data['mnt'] = export_data['mnt'].to_json() if isinstance(export_data.get('mnt'), pd.DataFrame) else None
         export_data['pvds'] = export_data['pvds'].to_json() if isinstance(export_data.get('pvds'), pd.DataFrame) else None
         export_data['results'] = export_data['results'].to_json() if isinstance(export_data.get('results'), pd.DataFrame) else None
-        st.download_button(tr("📥 Exporter le Projet (JSON)", "📥 Export Project"), data=json.dumps({'project_data': export_data}), file_name="projet_sig.json", mime="application/json")
+        st.download_button(tr("📥 Exporter le Projet (JSON)", "📥 Export Project (JSON)"), data=json.dumps({'project_data': export_data}), file_name="projet_sig.json", mime="application/json")
 
 st.sidebar.markdown("---")
 st.sidebar.header(tr("📍 Localisation", "📍 Location"))
@@ -139,15 +139,23 @@ api_key = st.sidebar.text_input("Clé API Google", type="password") if "Google" 
 uploaded_mnt = st.sidebar.file_uploader(tr("Importer MNT (.csv)", "Import DEM (.csv)"), type=['csv']) if "CSV" in api_choice else None
 
 # ==========================================
-# 6. SIDEBAR : GEOTECH PARAMS
+# 6. SIDEBAR : GEOTECH PARAMS & ASSISTANTS
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header(tr("🏗️ Projet & Logistique", "🏗️ Project & Logistics"))
-dead_load = st.sidebar.number_input("Charge Permanente [kPa]", value=20.0)
-live_load = st.sidebar.number_input("Exploitation [kPa]", value=80.0)
+dead_load = st.sidebar.number_input("Charge Permanente [kPa]", value=20.0, help="Poids des matériaux définitifs (Chaussée, fondation).")
+live_load = st.sidebar.number_input("Exploitation [kPa]", value=80.0, help="Poids des grues, conteneurs, trafics.")
 gamma_fill = st.sidebar.number_input("Densité Remblai [kN/m³]", value=19.0)
-surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 2.0, 1.2)
-target_time = st.sidebar.number_input("Temps Cible (Jours)", value=180)
+
+st.sidebar.markdown("---")
+assist_time = st.sidebar.toggle("⏱️ Assistant Fast-Track (Optimisation Délai)", value=False, help="Activez pour forcer un délai court. L'IA calculera la hauteur de remblai supplémentaire requise.")
+if assist_time:
+    target_time = st.sidebar.number_input("Délai maximal imposé (Jours)", value=90, step=10)
+    surcharge_ratio = 1.2 # Base for iteration
+else:
+    surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 2.0, 1.2)
+    target_time = st.sidebar.number_input("Temps d'observation (Jours)", value=180)
+
 design_life = st.sidebar.number_input("Durée de vie ouvrage [Années]", value=30)
 
 # ==========================================
@@ -181,7 +189,7 @@ else:
     for i, poly_coords in enumerate(drawn_polygons):
         with st.sidebar.expander(f"🔴 Zone {i+1} Paramètres", expanded=(i==0)):
             H = st.number_input("Épaisseur Argile (m)", value=8.0, key=f"H_{i}")
-            e0 = st.number_input("e0 (Indice des vides)", value=1.20, key=f"e0_{i}")
+            e0 = st.number_input("e0", value=1.20, key=f"e0_{i}")
             Cc = st.number_input("Cc", value=0.45, key=f"Cc_{i}")
             Cr = st.number_input("Cr", value=0.05, key=f"Cr_{i}")
             sig_0 = st.number_input("σ'0 [kPa]", value=40.0, key=f"s0_{i}")
@@ -210,7 +218,7 @@ with col_action:
         if not zones_data: st.error(tr("Aucune zone définie.", "No zones defined."))
         else:
             with st.spinner(tr("Génération Topographie & Tassements...", "Generating Topo & Settlement...")):
-                final_load, target_load, base_fill = calculate_loads(dead_load, live_load, surcharge_ratio, gamma_fill)
+                final_load = dead_load + live_load
                 
                 # --- MNT ACQUISITION ---
                 df_mnt = None
@@ -228,7 +236,6 @@ with col_action:
                     lons = np.arange(min_lon, max_lon + res, res)
                     lats = np.arange(min_lat, max_lat + res, res)
                     
-                    # CORRECTION : Ne garder que les points MNT strictement à l'intérieur des polygones
                     valid_pts = []
                     for lt in lats:
                         for ln in lons:
@@ -265,11 +272,30 @@ with col_action:
                 for z in zones_data:
                     poly = Polygon(z['coords'])
                     area = poly.area * (111000**2) * math.cos(math.radians(poly.centroid.y))
-                    S_max = max(calc_settlement_oedometer(z, target_load), calc_settlement_cptu(z, target_load), calc_settlement_spt(z, target_load))
+                    
+                    # FAST TRACK LOGIC
+                    opt_ratio = surcharge_ratio
+                    S_design_requis = max(calc_settlement_oedometer(z, final_load), calc_settlement_cptu(z, final_load), calc_settlement_spt(z, final_load))
+                    
+                    if assist_time:
+                        U_t = hansbo_consolidation(z['ch'], z['spacing'], target_time)
+                        if U_t < 0.05: U_t = 0.05 
+                        while True:
+                            test_load = final_load * opt_ratio
+                            S_test = max(calc_settlement_oedometer(z, test_load), calc_settlement_cptu(z, test_load), calc_settlement_spt(z, test_load))
+                            if (S_test * U_t) >= S_design_requis or opt_ratio > 3.0: break
+                            opt_ratio += 0.05
+                            
+                    z_target_load = final_load * opt_ratio
+                    z_base_fill = z_target_load / gamma_fill
+                    
+                    S_max = max(calc_settlement_oedometer(z, z_target_load), calc_settlement_cptu(z, z_target_load), calc_settlement_spt(z, z_target_load))
                     S_sec = calc_secondary_compression(z['C_alpha'], z['H'], target_time, design_life)
-                    actual_fill = base_fill + S_max
+                    actual_fill = z_base_fill + S_max
                     vol = area * actual_fill
-                    FS_mudwave = (5.14 * z['Su']) / (gamma_fill * actual_fill) if actual_fill > 0 else 999
+                    
+                    q_ult = 5.14 * z['Su']
+                    FS_mudwave = q_ult / (gamma_fill * actual_fill) if actual_fill > 0 else 999
                     
                     df_pvd = generate_pvd_grid(z['coords'], z['spacing'])
                     if not df_pvd.empty:
@@ -277,13 +303,13 @@ with col_action:
                         all_pvds = pd.concat([all_pvds, df_pvd])
                     
                     results_zones.append({
-                        'Zone': z['id'], 'Area': area, 'S_max': S_max, 'S_sec': S_sec,
+                        'Zone': z['id'], 'Area': area, 'S_max': S_max, 'S_sec': S_sec, 'Opt_Ratio': opt_ratio,
                         'Fill_H': actual_fill, 'Vol': vol, 'FS_Mudwave': FS_mudwave, 'PVD_Count': len(df_pvd)
                     })
                 
                 st.session_state['project_data'] = {
                     'zones': zones_data, 'results': pd.DataFrame(results_zones), 
-                    'pvds': all_pvds, 'mnt': df_mnt, 'target_time': target_time
+                    'pvds': all_pvds, 'mnt': df_mnt, 'assist_time_used': assist_time
                 }
                 st.success(tr("Analyse SIG Terminée !", "GIS Analysis Complete!"))
 
@@ -294,45 +320,64 @@ if st.session_state['project_data'] is not None:
     d = st.session_state['project_data']
     st.markdown("---")
     
-    t_topo, t_pvd, t_suivi, t_risk = st.tabs([
-        tr("🗺️ Topographie & Déformations", "🗺️ Topography & Deformation"), 
+    t_risk, t_topo, t_pvd, t_suivi = st.tabs([
+        tr("⚠️ Ingénierie & Sécurité", "⚠️ Engineering & Safety"), 
+        tr("🗺️ Modèle MNT", "🗺️ DEM Model"), 
         tr("📍 Logistique PVD", "📍 PVD Logistics"), 
-        tr("📉 Suivi & Coupes", "📉 Monitoring & Sections"),
-        tr("⚠️ Risques", "⚠️ Risks")
+        tr("📉 Suivi & Coupes", "📉 Monitoring & Sections")
     ])
+    
+    # --- ONGLET 1 : INGÉNIERIE, ASSISTANTS ET RISQUES ---
+    with t_risk:
+        st.subheader("Bilan des Risques et Assistants d'Exécution")
+        if d.get('assist_time_used', False):
+            st.success(f"🚀 **Assistant Fast-Track Activé :** Pour atteindre la consolidation dans le délai imposé de **{target_time} jours**, l'IA a redimensionné les hauteurs.")
 
-    # --- ONGLET 1 : TOPOGRAPHIE ---
+        for idx, res in d['results'].iterrows():
+            z_data = d['zones'][idx]
+            with st.container():
+                st.markdown(f"### 📍 Zone {int(res['Zone'])}")
+                c_r1, c_r2, c_r3 = st.columns(3)
+                c_r1.metric("Hauteur Remblai Cible", f"{res['Fill_H']:.2f} m", f"Ratio Surcharge: {res['Opt_Ratio']:.2f}")
+                c_r2.metric("Fluage Anticipé", f"{res['S_sec']:.3f} m")
+                c_r3.metric("FS Mudwave", f"{res['FS_Mudwave']:.2f}", "Danger" if res['FS_Mudwave'] < 1.3 else "Sécurisé", delta_color="inverse")
+                
+                if res['FS_Mudwave'] < 1.3:
+                    st.error("🚨 Risque de rupture au cisaillement (Mudwave).")
+                    assist_mw = st.toggle(f"🛡️ Assistant : Générer Phasage Sécurisé (Zone {int(res['Zone'])})", key=f"amw_{idx}")
+                    if assist_mw:
+                        H_safe_1 = (5.14 * z_data['Su']) / (gamma_fill * 1.3)
+                        st.info(f"**Protocole Automatisé :**\n1. **Levée 1 :** Poser maximum **{H_safe_1:.2f} m**.\n2. **Palier d'attente :** Patienter (~45j) pour la dissipation interstitielle.\n3. **Levées Suivantes :** Par passes de **{H_safe_1 * 0.8:.2f} m**.")
+                st.markdown("---")
+
+    # --- ONGLET 2 : TOPOGRAPHIE (SOUS-ECHANTILLONNEE) ---
     with t_topo:
         c1, c2 = st.columns([1, 2])
         with c1:
-            st.write(tr("**Carte MNT Interactive (Grille Parfaite)**", "**Interactive DEM Map (Perfect Grid)**"))
+            st.write(tr("**Carte Interactive MNT**", "**Interactive DEM Map**"))
             if d['mnt'] is not None and not d['mnt'].empty:
-                st.download_button(tr("📥 Télécharger MNT Complet", "📥 Download Full DEM"), data=d['mnt'].to_csv(index=False).encode('utf-8'), file_name='mnt_complet.csv', mime='text/csv')
+                st.download_button(tr("📥 Télécharger MNT Complet (CSV)", "📥 Download Full DEM"), data=d['mnt'].to_csv(index=False).encode('utf-8'), file_name='mnt_complet.csv', mime='text/csv')
         
         with c2:
             m_mnt = folium.Map(location=[d['mnt']['Lat'].mean(), d['mnt']['Lon'].mean()], zoom_start=16, tiles='CartoDB Positron')
             for z in d['zones']: folium.Polygon(locations=[(p[1], p[0]) for p in z['coords']], color='orange', weight=2, fill=False).add_to(m_mnt)
             
-            # Points bleus fins et grille aérée mathématiquement (1 sur 5)
-            df_text = d['mnt'].copy()
-            df_text['Lat_round'] = df_text['Lat'].round(5)
-            df_text['Lon_round'] = df_text['Lon'].round(5)
-            
-            lats_gardees = sorted(df_text['Lat_round'].unique())[::5]
-            lons_gardees = sorted(df_text['Lon_round'].unique())[::5]
-            df_text = df_text[df_text['Lat_round'].isin(lats_gardees) & df_text['Lon_round'].isin(lons_gardees)]
-            
             for idx, row in d['mnt'].iterrows():
-                folium.CircleMarker(location=[row['Lat'], row['Lon']], radius=1, color='blue', fill=True, fill_opacity=0.4, weight=0).add_to(m_mnt)
+                folium.CircleMarker(location=[row['Lat'], row['Lon']], radius=0.5, color='blue', fill=True, fill_opacity=0.3, weight=0).add_to(m_mnt)
+                
+            lats_gardees = sorted(d['mnt']['Lat'].unique())[::4]
+            lons_gardees = sorted(d['mnt']['Lon'].unique())[::4]
+            df_text = d['mnt'][d['mnt']['Lat'].isin(lats_gardees) & d['mnt']['Lon'].isin(lons_gardees)]
             
             for idx, row in df_text.iterrows():
-                # CORRECTION CRITIQUE : Centrage parfait du texte via CSS transform
-                html_style = "font-size:11px; font-weight:bold; color:#8B0000; text-shadow: 1px 1px 0px white, -1px -1px 0px white, 1px -1px 0px white, -1px 1px 0px white; white-space:nowrap; transform: translate(-50%, -50%);"
-                folium.Marker(location=[row['Lat'], row['Lon']], icon=folium.DivIcon(html=f'<div style="{html_style}">{row["Z"]:.1f}</div>')).add_to(m_mnt)
+                folium.Marker(
+                    location=[row['Lat'], row['Lon']],
+                    icon=folium.DivIcon(html=f'<div style="font-size: 11px; font-weight: bold; color: #8B0000; text-shadow: 1px 1px 0px white, -1px -1px 0px white, 1px -1px 0px white, -1px 1px 0px white; white-space: nowrap; transform: translate(-50%, -50%);">{row["Z"]:.1f}</div>')
+                ).add_to(m_mnt)
                 
-            st_folium(m_mnt, width=1200, height=500, key="mnt_grid_map")
+            st_folium(m_mnt, width=1000, height=500, key="mnt_grid_map")
 
-    # --- ONGLET 2 : LOGISTIQUE PVD ---
+    # --- ONGLET 3 : LOGISTIQUE PVD (ANTI-MOIRE) ---
     with t_pvd:
         tot_pvd = len(d['pvds']) if not d['pvds'].empty else 0
         st.write(f"Nombre total de PVD à commander : **{tot_pvd:,.0f} unités**.")
@@ -340,23 +385,25 @@ if st.session_state['project_data'] is not None:
         if not d['pvds'].empty:
             st.download_button(tr("📥 Télécharger Coordonnées PVD (Exécution)", "📥 Download PVD Coordinates"), data=d['pvds'].to_csv(index=False).encode('utf-8'), file_name='implantation_pvd.csv', mime='text/csv', type="primary")
             
-            # CORRECTION CRITIQUE : Échantillonnage propre pour Plotly pour éviter le bloc bleu
-            if tot_pvd > 2000:
-                step = tot_pvd // 2000
-                df_plot_pvd = d['pvds'].iloc[::step]
-                st.warning(f"⚠️ Affichage optimisé : Le nuage de points est allégé pour la visualisation.")
-            else: df_plot_pvd = d['pvds']
-
             fig_pvd = go.Figure()
             for z in d['zones']:
                 x, y = Polygon(z['coords']).exterior.xy
                 fig_pvd.add_trace(go.Scattermapbox(lat=list(y), lon=list(x), mode='lines', line=dict(width=3, color='red'), name=f"Zone {z['id']}"))
+                
+                df_zone_pvd = d['pvds'][d['pvds']['Zone'] == z['id']]
+                if len(df_zone_pvd) > 2000:
+                    vis_spacing = z['spacing'] * math.sqrt(len(df_zone_pvd) / 2000)
+                    df_plot_pvd = generate_pvd_grid(z['coords'], vis_spacing)
+                    st.warning(f"⚠️ Zone {z['id']} : Maille affichée élargie pour fluidité. Le CSV téléchargé contient la grille exacte.")
+                else: df_plot_pvd = df_zone_pvd
+
+                if not df_plot_pvd.empty:
+                    fig_pvd.add_trace(go.Scattermapbox(lat=df_plot_pvd['Lat'], lon=df_plot_pvd['Lon'], mode='markers', marker=go.scattermapbox.Marker(size=3, color='blue', opacity=0.7), name=f"PVDs Zone {z['id']}"))
             
-            fig_pvd.add_trace(go.Scattermapbox(lat=df_plot_pvd['Lat'], lon=df_plot_pvd['Lon'], mode='markers', marker=go.scattermapbox.Marker(size=3, color='blue', opacity=0.7), name="PVDs"))
             fig_pvd.update_layout(mapbox_style="carto-positron", mapbox_zoom=15, mapbox_center={"lat": d['pvds']['Lat'].mean(), "lon": d['pvds']['Lon'].mean()}, height=500, margin={"r":0,"t":0,"l":0,"b":0})
             st.plotly_chart(fig_pvd, use_container_width=True)
 
-    # --- ONGLET 3 : SUIVI & COUPES ---
+    # --- ONGLET 4 : SUIVI & COUPES ---
     with t_suivi:
         st.subheader("Monitoring (Asaoka) & Vues en Coupe")
         zone_suivi = st.selectbox("Sélectionner la Zone :", [f"Zone {z['id']}" for z in d['zones']], key="suivi_zone")
@@ -377,7 +424,7 @@ if st.session_state['project_data'] is not None:
         
         with c_m2:
             st.write("**Consolidation : Design vs Réalité**")
-            days = np.linspace(0, d['target_time'] * 1.5, 100)
+            days = np.linspace(0, target_time * 1.5, 100) # FIXED: Using global target_time
             S_th = [hansbo_consolidation(z_data['ch'], z_data['spacing'], t) * res_suivi['S_max'] for t in days]
             
             fig_suivi = go.Figure()
@@ -391,17 +438,3 @@ if st.session_state['project_data'] is not None:
                     if s_ult > res_suivi['S_max'] * 1.15: st.error(f"🚨 DÉVIATION : L'Asaoka réel dépasse le design de plus de 15%.")
             fig_suivi.add_hline(y=res_suivi['S_max'], line_color="blue", annotation_text=f"S_ult Théorique ({res_suivi['S_max']:.2f}m)")
             fig_suivi.update_layout(xaxis_title="Jours", yaxis_title="Tassement (m)", height=450); st.plotly_chart(fig_suivi, use_container_width=True)
-
-    # --- ONGLET 4 : RISQUES ---
-    with t_risk:
-        st.subheader("Bilan des Risques & Stabilité")
-        for idx, res in d['results'].iterrows():
-            st.markdown(f"### 🔴 Zone {int(res['Zone'])}")
-            c_r1, c_r2 = st.columns(2)
-            with c_r1:
-                st.write(f"**Fluage anticipé :** {res['S_sec']:.3f} m")
-                if res['S_sec'] > 0.15: st.warning("Le fluage long-terme risque de déformer la plateforme.")
-            with c_r2:
-                st.write(f"**FS Rupture (Mudwave) :** {res['FS_Mudwave']:.2f}")
-                if res['FS_Mudwave'] < 1.3: st.error(f"Risque de rupture. Levées progressives obligatoires.")
-            st.markdown("---")
