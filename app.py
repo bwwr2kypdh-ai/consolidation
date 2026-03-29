@@ -112,15 +112,24 @@ with st.sidebar.expander(tr("💾 Sauvegarder / Charger Projet", "💾 Save / Lo
         st.download_button("📥 Exporter JSON", data=json.dumps({'project_data': out}), file_name="master_project.json", mime="application/json")
 
 st.sidebar.markdown("---")
-st.sidebar.header(tr("🏗️ Niveaux & Charges", "🏗️ Levels & Loads"))
-z_target = st.sidebar.number_input(tr("Altitude Finale (Z projet) [m]", "Target Elev [m]"), value=4.5)
-dead_load = st.sidebar.number_input(tr("Charge Permanente [kPa]", "Dead Load"), value=20.0)
-live_load = st.sidebar.number_input(tr("Exploitation [kPa]", "Live Load"), value=80.0)
-gamma_fill = st.sidebar.number_input(tr("Densité Remblai [kN/m³]", "Fill Density"), value=19.0)
-surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 3.0, 1.25)
-design_life = st.sidebar.number_input(tr("Durée de vie [Années]", "Design Life"), value=30)
+st.sidebar.header(tr("📍 Recherche d'Adresse", "📍 Location Search"))
+search_query = st.sidebar.text_input(tr("Adresse ou GPS", "Address or GPS"))
+if st.sidebar.button(tr("Chercher", "Search")) and search_query:
+    try:
+        res = requests.get(f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1", headers={'User-Agent': 'TopoApp'}).json()
+        if res: st.session_state['map_center'] = [float(res[0]['lat']), float(res[0]['lon'])]; st.rerun()
+    except: pass
 
-st.sidebar.header(tr("🗺️ Topographie & Rendu", "🗺️ Topography & Render"))
+st.sidebar.header(tr("🏗️ Niveaux & Charges", "🏗️ Levels & Loads"))
+# PAS COHÉRENTS INTÉGRÉS ICI : step=0.5, step=5.0, etc.
+z_target = st.sidebar.number_input(tr("Altitude Finale (Z projet) [m]", "Target Elev [m]"), value=4.5, step=0.5)
+dead_load = st.sidebar.number_input(tr("Charge Permanente [kPa]", "Dead Load"), value=20.0, step=5.0)
+live_load = st.sidebar.number_input(tr("Exploitation [kPa]", "Live Load"), value=80.0, step=5.0)
+gamma_fill = st.sidebar.number_input(tr("Densité Remblai [kN/m³]", "Fill Density"), value=19.0, step=0.5)
+surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 3.0, 1.25, step=0.05)
+design_life = st.sidebar.number_input(tr("Durée de vie [Années]", "Design Life"), value=30, step=5)
+
+st.sidebar.header(tr("🗺️ Topographie API", "🗺️ DEM API"))
 api_choice = st.sidebar.selectbox("Source MNT", ["Open-Meteo", "Google API", "Fichier CSV Local"])
 api_key = st.sidebar.text_input("Clé API Google", type="password") if "Google" in api_choice else ""
 uploaded_mnt = st.sidebar.file_uploader("Import DEM CSV", type=['csv']) if "CSV" in api_choice else None
@@ -164,23 +173,24 @@ with col_zones:
         z_load = loaded_zones[i] if i < len(loaded_zones) else {}
         
         with st.expander(f"🔴 Zone {i+1}", expanded=(i==0)):
-            h_c = st.number_input("Épaisseur Argile (m)", value=float(z_load.get('H', 8.0)), key=f"h_{i}")
+            # PAS COHÉRENTS INTÉGRÉS ICI SUR TOUTES LES VARIABLES
+            h_c = st.number_input("Épaisseur Argile (m)", value=float(z_load.get('H', 8.0)), step=0.5, key=f"h_{i}")
             c_ed, c_insitu = st.columns(2)
             with c_ed:
-                cc = st.number_input("Cc", value=float(z_load.get('Cc', 0.45)), key=f"cc_{i}")
-                cr = st.number_input("Cr", value=float(z_load.get('Cr', 0.05)), key=f"cr_{i}")
-                e0 = st.number_input("e0", value=float(z_load.get('e0', 1.20)), key=f"e0_{i}")
-                s0 = st.number_input("σ'0 [kPa]", value=float(z_load.get('sig_0', 40.0)), key=f"s0_{i}")
-                sc = st.number_input("σ'c [kPa]", value=float(z_load.get('sig_c', 45.0)), key=f"sc_{i}")
+                cc = st.number_input("Cc", value=float(z_load.get('Cc', 0.45)), step=0.01, key=f"cc_{i}")
+                cr = st.number_input("Cr", value=float(z_load.get('Cr', 0.05)), step=0.01, key=f"cr_{i}")
+                e0 = st.number_input("e0", value=float(z_load.get('e0', 1.20)), step=0.05, key=f"e0_{i}")
+                s0 = st.number_input("σ'0 [kPa]", value=float(z_load.get('sig_0', 40.0)), step=1.0, key=f"s0_{i}")
+                sc = st.number_input("σ'c [kPa]", value=float(z_load.get('sig_c', 45.0)), step=1.0, key=f"sc_{i}")
             with c_insitu:
-                su = st.number_input("Su [kPa]", value=float(z_load.get('Su', 18.0)), key=f"su_{i}")
-                qt = st.number_input("qt [MPa]", value=float(z_load.get('qt', 0.60)), key=f"qt_{i}")
-                alpha = st.number_input("α_M", value=float(z_load.get('alpha', 4.0)), key=f"a_{i}")
-                n60 = st.number_input("N60", value=float(z_load.get('N60', 3.0)), key=f"n60_{i}")
-                f2 = st.number_input("f2", value=float(z_load.get('f2', 500.0)), key=f"f2_{i}")
-            ca = st.number_input("C_alpha", value=float(z_load.get('C_alpha', 0.015)), format="%.3f", key=f"ca_{i}")
-            ch = st.number_input("c_h [m²/yr]", value=float(z_load.get('ch', 2.0)), key=f"ch_{i}")
-            sp = st.number_input("Spacing PVD (m)", value=float(z_load.get('spacing', 1.2)), key=f"sp_{i}")
+                su = st.number_input("Su [kPa]", value=float(z_load.get('Su', 18.0)), step=1.0, key=f"su_{i}")
+                qt = st.number_input("qt [MPa]", value=float(z_load.get('qt', 0.60)), step=0.1, key=f"qt_{i}")
+                alpha = st.number_input("α_M", value=float(z_load.get('alpha', 4.0)), step=0.5, key=f"a_{i}")
+                n60 = st.number_input("N60", value=float(z_load.get('N60', 3.0)), step=1.0, key=f"n60_{i}")
+                f2 = st.number_input("f2", value=float(z_load.get('f2', 500.0)), step=10.0, key=f"f2_{i}")
+            ca = st.number_input("C_alpha", value=float(z_load.get('C_alpha', 0.015)), step=0.001, format="%.3f", key=f"ca_{i}")
+            ch = st.number_input("c_h [m²/yr]", value=float(z_load.get('ch', 2.0)), step=0.1, key=f"ch_{i}")
+            sp = st.number_input("Spacing PVD (m)", value=float(z_load.get('spacing', 1.2)), step=0.1, key=f"sp_{i}")
             
             zones_params.append({
                 'id': i+1, 'coords': poly, 'H': h_c, 'Cc': cc, 'Cr': cr, 'e0': e0, 'sig_0': s0, 'sig_c': sc,
@@ -258,6 +268,7 @@ if btn_calc or (btn_api and st.session_state['cached_mnt'] is not None):
                 mask = mnt.apply(lambda row: poly_obj.contains(Point(row['Lon'], row['Lat'])), axis=1)
                 z_nat = mnt[mask]['Z'].mean() if not mnt[mask].empty else 2.0
                 
+                # CHARGE PERMANENTE CALCULÉE PAR ZONE (Z_projet_final - Z_naturel_zone)
                 delta_z = z_target - z_nat
                 q_remblai = max(0, delta_z * gamma_fill)
                 q_surcharge = (q_remblai + dead_load + live_load) * surcharge_ratio
@@ -335,9 +346,8 @@ if st.session_state['project_data']:
 
     # --- TAB 2: TASSEMENTS ---
     with tabs[1]:
-        # Formattage propre sans erreur
         res_display = d['results'].copy()
-        for col in ['Z_nat', 'S_max', 'FS', 'H_fill']:
+        for col in ['Z_nat', 'Delta_Z', 'S_max', 'FS', 'H_fill']:
             if col in res_display.columns: res_display[col] = res_display[col].round(2)
         if 'Vol' in res_display.columns: res_display['Vol'] = res_display['Vol'].round(0)
         st.dataframe(res_display, use_container_width=True)
@@ -391,7 +401,7 @@ if st.session_state['project_data']:
             f_cp.add_trace(go.Scatter(x=[0,100,100,0], y=[0,0,-clay_h_val,-clay_h_val], fill='toself', name='Argile', fillcolor='brown'))
             f_cp.add_trace(go.Scatter(x=[10,90,80,20], y=[0,0,h_fill_val,h_fill_val], fill='toself', name='Remblai', fillcolor='orange'))
             f_cp.update_layout(height=250, margin=dict(t=20, b=20)); st.plotly_chart(f_cp, use_container_width=True)
-            df_mon = st.data_editor(pd.DataFrame({'Jour': [0, 30, 60, 90], 'Tassement_m': [0.0, 0.2, 0.45, 0.6]}), num_rows="dynamic")
+            df_mon = st.data_editor(pd.DataFrame({'Jour': [0.0, 30.0, 60.0, 90.0], 'Tassement_m': [0.0, 0.2, 0.45, 0.6]}), num_rows="dynamic")
         
         with c_m2:
             st.write("**Suivi de Consolidation**")
@@ -399,10 +409,13 @@ if st.session_state['project_data']:
             S_th = [hansbo_consolidation(z_inf.get('ch', 2.0), z_inf.get('spacing', 1.2), t) * s_max_val for t in days]
             f_s = go.Figure()
             f_s.add_trace(go.Scatter(x=days, y=S_th, name='Design', line=dict(dash='dash', color='blue')))
-            f_s.add_trace(go.Scatter(x=df_mon['Jour'], y=df_mon['Tassement_m'], name='Terrain', mode='markers+lines', marker=dict(color='red', size=10)))
-            if len(df_mon) >= 3:
-                s_ult, _, _, _, _ = calculate_asaoka(df_mon['Jour'].values, df_mon['Tassement_m'].values, 15)
-                if s_ult:
-                    f_s.add_hline(y=s_ult, line_color="orange", annotation_text=f"Asaoka ({s_ult:.2f}m)")
+            
+            df_clean = df_mon.dropna().apply(pd.to_numeric, errors='coerce').dropna()
+            if not df_clean.empty:
+                f_s.add_trace(go.Scatter(x=df_clean['Jour'], y=df_clean['Tassement_m'], name='Terrain', mode='markers+lines', marker=dict(color='red', size=10)))
+                if len(df_clean) >= 3:
+                    s_ult, _, _, _, _ = calculate_asaoka(df_clean['Jour'].values, df_clean['Tassement_m'].values, 15)
+                    if s_ult: f_s.add_hline(y=s_ult, line_color="orange", annotation_text=f"Asaoka ({s_ult:.2f}m)")
+            
             f_s.add_hline(y=s_max_val, line_color="blue", annotation_text=f"S_ult Théorique ({s_max_val:.2f}m)")
             f_s.update_layout(height=450); st.plotly_chart(f_s, use_container_width=True)
