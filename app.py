@@ -303,24 +303,37 @@ if st.session_state['project_data']:
                 st_folium(m_mnt, width=600, height=400, key="mnt_m")
         except: st.warning("Contours Error")
 
+# --- TAB 2: RISKS & SETTLEMENTS ---
     with tabs[1]:
-        st.dataframe(d['results'])
+        st.dataframe(d['results'], use_container_width=True)
         for idx, row in d['results'].iterrows():
-            # CORRECTION KEYERROR : Sécurisation de l'accès aux vieilles sauvegardes
-            s_oedo = row.get('S_oedo', row.get('S_max', 0))
-            s_cpt = row.get('S_cpt', row.get('S_max', 0))
-            s_spt = row.get('S_spt', row.get('S_max', 0))
-            
-            st.markdown(f"**Zone {int(row['Zone'])}**")
-            c_r1, c_r2 = st.columns(2)
-            with c_r1:
-                fig_c = go.Figure(data=[go.Bar(name='Oedo', x=['Modèles'], y=[s_oedo]), go.Bar(name='CPTu', x=['Modèles'], y=[s_cpt]), go.Bar(name='SPT', x=['Modèles'], y=[s_spt])])
-                fig_c.update_layout(height=250, margin=dict(t=10, b=0)); st.plotly_chart(fig_c, use_container_width=True)
-            with c_r2:
-                if row['FS'] < 1.3:
-                    st.error(f"RISQUE MUDWAVE ! FS={row['FS']:.2f}. Levée max: {(5.14*d['zones'][idx]['Su'])/(gamma_fill*1.3):.2f}m")
-                else: st.success(f"Stable (FS={row['FS']:.2f})")
-            st.markdown("---")
+            with st.container():
+                st.markdown(f"**Analyse Zone {int(row['Zone'])}**")
+                
+                # --- CORRECTION : SÉCURITÉ DE RÉTROCOMPATIBILITÉ ---
+                s_oedo = row.get('S_oedo', row.get('S_max', 0))
+                s_cpt = row.get('S_cpt', row.get('S_max', 0))
+                s_spt = row.get('S_spt', row.get('S_max', 0))
+                # On cherche 'FS', et s'il n'existe pas, on cherche l'ancien 'FS_Mudwave'
+                fs_val = row.get('FS', row.get('FS_Mudwave', 999.0)) 
+                
+                c_1, c_2 = st.columns(2)
+                with c_1:
+                    fig_c = go.Figure(data=[
+                        go.Bar(name='Oedomètre', x=['Méthodes'], y=[s_oedo]), 
+                        go.Bar(name='CPTu', x=['Méthodes'], y=[s_cpt]), 
+                        go.Bar(name='SPT', x=['Méthodes'], y=[s_spt])
+                    ])
+                    fig_c.update_layout(height=250, margin=dict(t=30, b=0))
+                    st.plotly_chart(fig_c, use_container_width=True)
+                    
+                with c_2:
+                    if fs_val < 1.3:
+                        st.error(f"🚨 RISQUE MUDWAVE ! FS = {fs_val:.2f}")
+                        st.info(f"💡 Conseil : Effectuer une première levée de {(5.14*d['zones'][idx]['Su'])/(gamma_fill*1.3):.2f}m maximum.")
+                    else: 
+                        st.success(f"✅ FS Mudwave Stable ({fs_val:.2f})")
+                st.markdown("---")
 
     with tabs[2]:
         tot = len(d['pvds'])
