@@ -31,17 +31,7 @@ if 'project_data' not in st.session_state: st.session_state['project_data'] = No
 # ==========================================
 # 2. AUTHENTICATION
 # ==========================================
-def check_password():
-    def password_entered():
-        if st.session_state["pwd_input"].strip().lower() == "admin":
-            st.session_state["authenticated"] = True
-            del st.session_state["pwd_input"] 
-        else: st.session_state["authenticated"] = False
-    if not st.session_state.get("authenticated", False):
-        st.title("🔒 Accès Sécurisé SIG / Secure Access")
-        st.text_input("Mot de passe (admin) :", type="password", on_change=password_entered, key="pwd_input")
-        st.stop()
-check_password()
+
 
 # ==========================================
 # 3. MOTEUR MATHÉMATIQUE CONSOLDIDÉ
