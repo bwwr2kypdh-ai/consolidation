@@ -1,9 +1,10 @@
 streamlit
-streamlit-folium
 folium
-requests
+streamlit-folium
 pandas
 numpy
 shapely
+requests
 plotly
 matplotlib
+scipy
