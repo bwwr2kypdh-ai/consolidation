@@ -24,31 +24,41 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
 # ==========================================
-# 2. AUTHENTICATION (BULLETPROOF VERSION)
+# 2. AUTHENTICATION (CALLBACK PATTERN)
 # ==========================================
-if "authenticated" not in st.session_state: 
-    st.session_state["authenticated"] = False
-
-if not st.session_state["authenticated"]:
-    st.title("🔒 Secure Access - Geotechnical Portal")
-    
-    # Removed st.form to prevent state-sync lag on 'Enter' key presses
-    passcode = st.text_input("Access Code (Hint: admin):", type="password")
-    
-    # Listen for the button click
-    if st.button("Login", type="primary"):
-        # .strip() removes invisible spaces, .lower() ignores Caps Lock
-        if passcode.strip().lower() == "admin":
+def check_password():
+    # This function runs instantly when the user presses Enter
+    def password_entered():
+        if st.session_state["pwd_input"].strip().lower() == "admin":
             st.session_state["authenticated"] = True
-            st.rerun()
-        elif passcode: # Only show error if they actually typed something
+            del st.session_state["pwd_input"]  # Clear the password from memory securely
+        else:
+            st.session_state["authenticated"] = False
+
+    # If not logged in, show the prompt
+    if not st.session_state.get("authenticated", False):
+        st.title("🔒 Secure Access - Geotechnical Portal")
+        
+        # The key="pwd_input" links this input directly to the session state
+        st.text_input(
+            "Access Code (Type 'admin' and press Enter):", 
+            type="password", 
+            on_change=password_entered, 
+            key="pwd_input"
+        )
+        
+        # Show error only if they made an attempt and it was flagged as False
+        if "authenticated" in st.session_state and not st.session_state["authenticated"]:
             st.error("Incorrect Password. Please try again.")
             
-    st.stop() # Halts execution of the rest of the app until logged in
+        st.stop()  # Halt the app here until authenticated
 
-if st.sidebar.button("Logout 🚪"): 
+# Run the security check
+check_password()
+
+# Provide a logout button in the sidebar
+if st.sidebar.button("Logout 🚪"):
     st.session_state["authenticated"] = False
     st.rerun()
 
