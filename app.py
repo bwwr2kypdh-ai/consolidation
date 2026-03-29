@@ -86,7 +86,7 @@ def calculate_asaoka(times, settlements, delta_t=15):
     return coef[1] / (1 - coef[0]), coef[1], coef[0], s_n1, s_n
 
 # ==========================================
-# 4. SIDEBAR : CONFIGURATION & ÉCHANGES
+# 4. SIDEBAR : CONFIGURATION & SAUVEGARDE
 # ==========================================
 st.session_state["lang"] = st.sidebar.radio("🌐 Language", ["Français", "English"])
 if st.sidebar.button(tr("Se déconnecter 🚪", "Logout")): st.session_state["authenticated"] = False; st.rerun()
@@ -98,30 +98,32 @@ with st.sidebar.expander(tr("💾 Sauvegarder / Charger Projet", "💾 Save / Lo
         try:
             saved = json.load(uploaded_file)
             st.session_state['project_data'] = saved.get('project_data')
-            if st.session_state['project_data'] and 'mnt' in st.session_state['project_data']:
-                st.session_state['cached_mnt'] = pd.read_json(st.session_state['project_data']['mnt'])
-            st.success("OK")
-        except: st.error("Error")
+            # RECONSTRUCTION DES DATAFRAMES AU CHARGEMENT
+            if st.session_state['project_data']:
+                if st.session_state['project_data'].get('mnt'):
+                    st.session_state['project_data']['mnt'] = pd.read_json(st.session_state['project_data']['mnt'])
+                    st.session_state['cached_mnt'] = st.session_state['project_data']['mnt']
+                if st.session_state['project_data'].get('results'):
+                    st.session_state['project_data']['results'] = pd.read_json(st.session_state['project_data']['results'])
+                if st.session_state['project_data'].get('pvds'):
+                    st.session_state['project_data']['pvds'] = pd.read_json(st.session_state['project_data']['pvds'])
+            st.success(tr("Projet chargé avec succès !", "Project loaded successfully !"))
+        except Exception as e: 
+            st.error(f"Erreur de lecture JSON : {e}")
     
     if st.session_state['project_data']:
         out = st.session_state['project_data'].copy()
+        # CORRECTION : CONVERSION DE TOUS LES DATAFRAMES EN JSON AVANT EXPORT
         if isinstance(out.get('mnt'), pd.DataFrame): out['mnt'] = out['mnt'].to_json()
-        st.download_button(tr("📥 Exporter", "📥 Export"), data=json.dumps({'project_data': out}), file_name="master_project.json")
-
-st.sidebar.markdown("---")
-st.sidebar.header(tr("🏗️ Niveaux & Charges", "🏗️ Levels & Loads"))
-# --- PARAMÈTRE CIBLE FINIE ---
-z_target_final = st.sidebar.number_input(tr("Niveau Fini Visé (Z projet) [m]", "Target Elevation [m]"), value=4.5, help="Niveau final de la plateforme après tassement.")
-dead_load_def = st.sidebar.number_input(tr("Charge Permanente [kPa]", "Dead Load"), value=20.0, help="Poids chaussée/dalles.")
-live_load_def = st.sidebar.number_input(tr("Exploitation [kPa]", "Live Load"), value=80.0, help="Poids grues/containers.")
-gamma_fill = st.sidebar.number_input(tr("Densité Remblai [kN/m³]", "Fill Density"), value=19.0)
-surcharge_ratio = st.sidebar.slider("Surcharge Ratio", 1.0, 3.0, 1.25, help="Ratio charge temporaire / charge finale.")
-design_life = st.sidebar.number_input(tr("Durée de vie [Années]", "Design Life"), value=30)
-
-st.sidebar.header(tr("🗺️ Topographie API", "🗺️ DEM API"))
-api_choice = st.sidebar.selectbox("Source", ["Open-Meteo", "Google API", "Fichier CSV"])
-api_key = st.sidebar.text_input("Key", type="password") if "Google" in api_choice else ""
-uploaded_mnt = st.sidebar.file_uploader("Import DEM CSV", type=['csv']) if "CSV" in api_choice else None
+        if isinstance(out.get('results'), pd.DataFrame): out['results'] = out['results'].to_json()
+        if isinstance(out.get('pvds'), pd.DataFrame): out['pvds'] = out['pvds'].to_json()
+        
+        st.download_button(
+            tr("📥 Exporter le Projet", "📥 Export Project"), 
+            data=json.dumps({'project_data': out}), 
+            file_name="master_project.json",
+            mime="application/json"
+        )
 
 # ==========================================
 # 5. CARTE DE SAISIE & ZONAGE
