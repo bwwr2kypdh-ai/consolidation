@@ -427,3 +427,7 @@ if st.session_state['project_data'] is not None:
                     if s_ult > res_suivi['S_max'] * 1.15: st.error(f"🚨 DÉVIATION : L'Asaoka réel dépasse le design de plus de 15%.")
             fig_suivi.add_hline(y=res_suivi['S_max'], line_color="blue", annotation_text=f"S_ult Théorique ({res_suivi['S_max']:.2f}m)")
             fig_suivi.update_layout(xaxis_title="Jours", yaxis_title="Tassement (m)", height=450); st.plotly_chart(fig_suivi, use_container_width=True)
+
+
+
+permettre de maj le calcul des tassements et le model après chaque changement, sans relancer la collecte des API.... cela parait évident... aussi où choisir le niveau fini envisagé pour calculer la surchage liée au remblai ou déblai...
